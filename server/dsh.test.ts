@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -27,25 +27,35 @@ async function until(check: () => Promise<boolean>, detail: string) {
   assert.fail(detail);
 }
 
-async function fixture(t: TestContext, options: { wrongIdentity?: boolean; stubborn?: boolean } = {}) {
+async function fixture(t: TestContext, options: { wrongIdentity?: boolean; stubborn?: boolean; startupTimeoutMs?: number; probeDelayMs?: number; stall?: 'identity-headers' | 'identity-body' | 'api-headers' | 'api-body' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'sessiondeck-dsh-events-'));
   const file = join(dir, 'native-events-fixture.cjs'), id = `session-${randomUUID()}`;
   const wsModule = fileURLToPath(new URL('../node_modules/ws/index.js', import.meta.url));
   await writeFile(file, `#!${process.execPath}
 const http = require('node:http');
+const fs = require('node:fs');
 const { WebSocketServer } = require(${JSON.stringify(wsModule)});
 const args = process.argv.slice(2), id = ${JSON.stringify(id)};
 ${options.stubborn ? "process.on('SIGTERM', () => {});" : ''}
 let running = false, history = [], holdReplay = false, muxConnections = 0;
 const pending = new Map(), paused = new Set();
 const server = http.createServer(async (request, response) => {
+  if (${options.probeDelayMs ?? 0} && ['/sessiondeck/instance','/api/session.list'].includes(request.url)) await new Promise(resolve => setTimeout(resolve, ${options.probeDelayMs ?? 0}));
+  const stall = ${JSON.stringify(options.stall ?? '')};
+  if ((stall.startsWith('identity') && request.url === '/sessiondeck/instance') || (stall.startsWith('api') && request.url === '/api/session.list')) {
+    fs.appendFileSync(${JSON.stringify(join(dir, 'stalled-probes'))},request.url+'\\n');
+    if (stall.endsWith('body')) { response.writeHead(200); response.write(stall.startsWith('identity') ? process.env.SESSIONDECK_DSH_LAUNCH_TOKEN : '{'); }
+    return;
+  }
   if (request.url === '/sessiondeck/instance') { response.end(${options.wrongIdentity ? "'another-process'" : 'process.env.SESSIONDECK_DSH_LAUNCH_TOKEN'}); return; }
   if (request.method === 'GET') {
     response.end(request.url === '/fixture' ? JSON.stringify({muxConnections}) : 'native fixture'); return;
   }
   let body = ''; for await (const chunk of request) body += chunk;
   const input = JSON.parse(body);
+  if (['session.create','session.fork'].includes(input.method)) fs.appendFileSync(${JSON.stringify(join(dir, 'native-mutations'))},input.method+'\\n');
   if (request.url === '/fixture') {
+    if (input.exit) { response.end('{}'); setImmediate(() => process.exit(0)); return; }
     if (Object.hasOwn(input, 'running')) running = input.running;
     if (Object.hasOwn(input, 'history')) history = input.history;
     if (Object.hasOwn(input, 'holdReplay')) holdReplay = input.holdReplay;
@@ -86,7 +96,7 @@ ${options.wrongIdentity ? 'setTimeout(() => process.exit(1), 800);' : ''}
 `, { mode: 0o700 });
   const previous = process.env.SESSIONDECK_DSH_BIN;
   process.env.SESSIONDECK_DSH_BIN = file;
-  const bridge = new DshBridge({ port: await freePort(), dataDir: dir, cwd: dir });
+  const bridge = new DshBridge({ port: await freePort(), dataDir: dir, cwd: dir, startupTimeoutMs: options.startupTimeoutMs });
   t.after(async () => {
     await bridge.close();
     if (previous === undefined) delete process.env.SESSIONDECK_DSH_BIN;
@@ -108,16 +118,15 @@ ${options.wrongIdentity ? 'setTimeout(() => process.exit(1), 800);' : ''}
 test('dsh startup cancellation and immediate running-process replacement own independent generations', { timeout: 15_000 }, async t => {
   const { bridge, directory } = await fixture(t);
   const cancelled = bridge.start();
-  bridge.stop();
+  const cancelling = bridge.stop();
   const replacement = bridge.start();
-  await assert.rejects(cancelled, /启动已取消/);
-  await replacement;
+  await Promise.all([assert.rejects(cancelled, /启动已取消/), replacement, cancelling]);
   assert.equal((await fetch(bridge.baseUrl)).status, 200);
-  bridge.stop();
+  const retiring = bridge.stop();
   // start waits for the old listener to release its port before probing it.
-  await bridge.start();
+  await Promise.all([bridge.start(), retiring]);
   assert.equal((await fetch(bridge.baseUrl)).status, 200);
-  bridge.stop();
+  await bridge.stop();
   await until(async () => {
     try { await fetch(bridge.baseUrl, { signal: AbortSignal.timeout(100) }); return false; }
     catch { return true; }
@@ -135,8 +144,7 @@ test('repeated dsh stop/start retires stubborn generations and cleans their invo
   await bridge.start();
   for (let cycle = 0; cycle < 2; cycle++) {
     const stopping = bridge.stop();
-    await bridge.start();
-    await stopping;
+    await Promise.all([bridge.start(), stopping]);
     assert.equal((await readdir(directory)).filter(name => name.startsWith('dsh-launch-')).length, 1);
     assert.equal((await fetch(bridge.baseUrl)).status, 200);
   }
@@ -151,9 +159,9 @@ test('dsh never adopts or stops a service already occupying the selected port', 
   await new Promise<void>(accept => existing.listen(0, '127.0.0.1', accept));
   const address = existing.address(); assert.ok(address && typeof address === 'object');
   const bridge = new DshBridge({ port: address.port, dataDir: directory, cwd: directory });
-  t.after(async () => { bridge.stop(); await new Promise<void>(accept => existing.close(() => accept())); });
+  t.after(async () => { await bridge.close(); await new Promise<void>(accept => existing.close(() => accept())); });
   await assert.rejects(bridge.start(), /已被占用/);
-  bridge.stop();
+  await bridge.stop();
   assert.equal(await (await fetch(bridge.baseUrl)).text(), 'existing service');
 });
 
@@ -239,7 +247,7 @@ test('dsh recovers stable completion/error identities from native history and re
   assert.equal(recovered.attentionKey, `dsh:turn:${id}:40:completed`);
   // The event identity comes from native history, so clearing all bridge state
   // and starting a replacement does not manufacture a different notification.
-  bridge.stop();
+  await bridge.stop();
   await bridge.start();
   await configure({ history: [offlineCompletion] });
   assert.equal((await waitStatus('waiting_input')).attentionKey, recovered.attentionKey);
@@ -257,12 +265,12 @@ test('dsh stop aborts in-flight native responses before a replacement generation
   await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
   const address = server.address(); assert.ok(address && typeof address === 'object');
   const bridge = new DshBridge({ port: address.port, manageProcess: false });
-  t.after(async () => { bridge.stop(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); });
+  t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); });
   await bridge.start();
   const old = bridge.getStatus(id);
   await until(async () => !!release, 'native list did not start');
-  bridge.stop();
-  await bridge.start();
+  const stopping = bridge.stop();
+  await Promise.all([bridge.start(), stopping]);
   release!();
   assert.equal((await old).status, 'unknown');
 });
@@ -291,4 +299,50 @@ test('stopping a cold persisted DSH session is a no-op, while running or unknown
   running = undefined;
   await assert.rejects(bridge.stopSession(id), /not attached/);
   assert.equal(cancellations, 3);
+});
+
+for (const stall of ['identity-headers', 'identity-body', 'api-headers', 'api-body'] as const) {
+  test(`dsh total startup deadline bounds stalled ${stall} and finishes owned cleanup before rejecting`, { timeout: 5000 }, async t => {
+    const { bridge, directory } = await fixture(t, { stall, startupTimeoutMs: 650 });
+    const started = Date.now();
+    await assert.rejects(bridge.start(), /启动超时/);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 600 && elapsed < 1100, `Total readiness deadline drifted to ${elapsed}ms`);
+    assert.ok((await readFile(join(directory, 'stalled-probes'), 'utf8')).includes(stall.startsWith('identity') ? '/sessiondeck/instance' : '/api/session.list'));
+    assert.equal((await readdir(directory)).filter(name => name.startsWith('dsh-launch-')).length, 0, 'Timed-out launch left its plugin files');
+    await assert.rejects(fetch(bridge.baseUrl, { signal: AbortSignal.timeout(100) }), /fetch failed/);
+  });
+}
+
+test('dsh timeout also retires a stubborn process and never lets a late probe mark the bridge ready', { timeout: 5000 }, async t => {
+  const { bridge, directory, id } = await fixture(t, { stall: 'api-body', stubborn: true, startupTimeoutMs: 450 });
+  const started = Date.now();
+  await assert.rejects(bridge.start(), /启动超时/);
+  assert.ok(Date.now() - started < 1800, 'Startup deadline plus bounded process cleanup exceeded its budget');
+  assert.equal((await readdir(directory)).filter(name => name.startsWith('dsh-launch-')).length, 0);
+  assert.equal((await bridge.getStatus(id)).status, 'unknown');
+  await assert.rejects(fetch(bridge.baseUrl, { signal: AbortSignal.timeout(100) }), /fetch failed/);
+});
+
+test('dsh close waits for invocation files after the native process exits on its own', { timeout: 8000 }, async t => {
+  const { bridge, directory, configure } = await fixture(t);
+  await bridge.start();
+  const childExit = configure({ exit: true });
+  await childExit;
+  await until(async () => {
+    try { return !(await fetch(bridge.baseUrl, { signal: AbortSignal.timeout(100) })).ok; }
+    catch { return true; }
+  }, 'Fixture process did not exit');
+  await bridge.close();
+  assert.equal((await readdir(directory)).filter(name => name.startsWith('dsh-launch-')).length, 0);
+});
+
+test('slow successful readiness probes share one deadline and cannot create a native session after it expires', { timeout: 5000 }, async t => {
+  const { bridge, directory } = await fixture(t, { probeDelayMs: 350, startupTimeoutMs: 650 });
+  const started = Date.now();
+  await assert.rejects(bridge.createSession(directory), /启动超时/);
+  assert.ok(Date.now() - started < 1100, 'Sequential probes each consumed an independent timeout budget');
+  assert.equal((await readdir(directory)).filter(name => name.startsWith('dsh-launch-')).length, 0);
+  assert.equal((await readFile(join(directory, 'native-mutations'), 'utf8').catch(() => '')), '');
+  await assert.rejects(fetch(bridge.baseUrl, { signal: AbortSignal.timeout(100) }), /fetch failed/);
 });

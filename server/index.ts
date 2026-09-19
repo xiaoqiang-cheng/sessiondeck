@@ -484,7 +484,7 @@ const nativePoll = setInterval(async () => {
       if (!current?.running || stopping.has(item.id) || current.nativeSessionId !== item.nativeSessionId || launchIds.get(item.id) !== launchId) return;
       const attentionKey = 'attentionKey' in next && typeof next.attentionKey === 'string' ? next.attentionKey : undefined;
       if (current.status !== next.status || current.statusDetail !== next.detail || (attentionKey && current.lastAttentionKey !== attentionKey))
-        status(item.id, { status: next.status, statusSource: 'native', statusDetail: next.detail || '来自原生会话状态', ...(attentionKey ? { lastAttentionKey: attentionKey } : {}) });
+        status(item.id, { status: next.status, statusSource: 'native', statusDetail: next.detail || '来自原生会话状态', lastActivity: new Date().toISOString(), ...(attentionKey ? { lastAttentionKey: attentionKey } : {}) });
     };
     // One unresponsive member must not delay status updates for every other
     // backend. Keep concurrency bounded even with a large contact list.

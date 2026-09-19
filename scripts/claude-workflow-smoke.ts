@@ -159,17 +159,26 @@ try {
     }
     throw new Error(`Native history not persisted for ${id}`);
   };
+  await waitFor(async () => {
+    try { return (await nativeHistory(sourceId)).includes('SESSIONDECK_SOURCE_REPLY'); }
+    catch { return false; }
+  }, 'Source native history did not finish flushing before Fork');
   const before = await nativeHistory(sourceId);
   assert.ok(before.includes('SESSIONDECK_SOURCE_REPLY'));
   const childTui = await openTui(childId, sourceId);
   await submit(childTui, 'SESSIONDECK_CHILD');
   await waitFor(() => hooks.some(event => event.session_id === childId && event.hook_event_name === 'Stop') && childTui.text().includes('SESSIONDECK_CHILD_REPLY'), 'Child turn did not finish');
-  assert.ok((await nativeHistory(childId)).includes('SESSIONDECK_SOURCE_REPLY'), 'Fork did not persist the inherited source context');
+  // Claude can send Stop before its queued transcript writes reach disk.
+  // Wait for observable native persistence instead of racing that flush.
+  await waitFor(async () => {
+    try { return (await nativeHistory(childId)).includes('SESSIONDECK_SOURCE_REPLY'); }
+    catch { return false; }
+  }, 'Fork did not persist the inherited source context');
   assert.equal(await nativeHistory(sourceId), before, 'Child prompt changed source native history');
   const childRequest = requests.find(request => request.marker === 'SESSIONDECK_CHILD');
   assert.ok(childRequest?.input.includes('SESSIONDECK_SOURCE_REPLY'), 'Fork did not send inherited context to the provider');
   await submit(childTui, 'SESSIONDECK_ACCEPT');
-  await waitFor(() => hooks.some(event => event.session_id === childId && event.hook_event_name === 'PermissionRequest') && childTui.text().includes('approved-fixture'), 'Claude approval did not appear for the disposable fixture write');
+  await waitFor(() => hooks.some(event => event.session_id === childId && event.hook_event_name === 'PermissionRequest') && childTui.text().includes('approved-fixture') && childTui.text().includes('Do you want to proceed?'), 'Claude approval did not appear for the disposable fixture write');
   childTui.child.write('1');
   await delay(200);
   childTui.child.write('\r');

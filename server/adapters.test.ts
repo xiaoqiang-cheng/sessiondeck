@@ -105,7 +105,7 @@ test('DSH native API uses precise identity and refuses fork cwd mismatch', async
     assert.deepEqual(calls.at(-1)?.payload,{sessionId:id,mode:'queue',content:[{type:'text',text:'group handoff'}]});
     await bridge.stopSession(id);assert.equal(calls.at(-1)?.method,'session.cancel');
     mismatch=true;await assert.rejects(bridge.openSession(id),/请求 ID/);
-  } finally {bridge.stop();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+  } finally {await bridge.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
 test('DSH deep link waits for native session list and opens only the specified contact once', () => {

@@ -16,7 +16,7 @@ async function until(check: () => boolean, description: string) {
 test('group staging strips embedded terminal controls and does not send a submit character', { timeout: 8000 }, async t => {
   const store = new Store(':memory:');
   const terminals = new Terminals();
-  t.after(() => { terminals.close(); store.close(); });
+  t.after(async () => { try { await terminals.close(); } finally { store.close(); } });
   const session = store.addSession({ backend: 'codex', title: 'control stripping fixture', cwd: process.cwd() });
   let output = '';
   terminals.on('data', (_id, data: string) => { output += data; });
@@ -40,7 +40,7 @@ test('group staging strips embedded terminal controls and does not send a submit
 test('late exit of a stopped PTY cannot stop or replace a newly started terminal for the same contact', { timeout: 8000 }, async t => {
   const store = new Store(':memory:');
   const terminals = new Terminals();
-  t.after(() => { terminals.close(); store.close(); });
+  t.after(async () => { try { await terminals.close(); } finally { store.close(); } });
   const session = store.addSession({ backend: 'claude', title: 'restart fixture', cwd: process.cwd() });
   const exits: number[] = [];
   terminals.on('exit', (_id: string, code: number) => exits.push(code));

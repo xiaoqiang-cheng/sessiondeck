@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, Archive, Bell, BellOff, Check, CheckCheck,
   ChevronDown, ChevronRight, CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
   GitFork, Layers3, LayoutGrid, LoaderCircle, MessageSquare, Pencil, Pin, Play, Plus,
   Radio, Search, Send, Settings2, Share2, Square, TerminalSquare, UsersRound, X,
 } from 'lucide-react';
-import type { AppState, Backend, DiscoveredSession, Group, GroupDetail, GroupMessage, Session, SessionStatus } from '../shared/types';
+import type { AppState, Backend, DiscoveredSession, Delivery, Group, GroupDetail, GroupMessage, Session, SessionStatus } from '../shared/types';
 import { api, getToken } from './api';
 import TerminalPane from './TerminalPane';
 import { useWorkspaceRoute, workspaceHash, type View } from './navigation';
@@ -395,23 +395,66 @@ function GroupBoard({ detail, members, demo, busy, post, deliver, cancel, open, 
   const [text, setText] = useState(draft.text);
   const [recipients, setRecipients] = useState<string[]>(draft.recipients);
   const [sourceMessageId, setSourceMessageId] = useState<string | null>(draft.sourceMessageId);
+  const [visibleStart, setVisibleStart] = useState(() => Math.max(0, detail.messages.length - 200));
+  const firstVisible = Math.min(visibleStart, Math.max(0, detail.messages.length - 1));
+  const visibleMessages = useMemo(() => detail.messages.slice(firstVisible), [detail.messages, firstVisible]);
+  const historyRef = useRef<HTMLDivElement>(null);
+  const previousHistoryScroll = useRef<{ top: number; height: number } | null>(null);
+  const pendingMessageJump = useRef<string | null>(null);
   const currentDraftRef = useRef('');
   currentDraftRef.current = JSON.stringify({ text, kind, recipients, sourceMessageId });
-  const sourceMessage = detail.messages.find(message => message.id === sourceMessageId);
+  const messagesById = useMemo(() => new Map(detail.messages.map(message => [message.id, message])), [detail.messages]);
+  const messagePositions = useMemo(() => new Map(detail.messages.map((message, index) => [message.id, index])), [detail.messages]);
+  const membersById = useMemo(() => new Map(members.map(member => [member.id, member])), [members]);
+  const deliveriesByMessage = useMemo(() => {
+    const index = new Map<string, Delivery[]>();
+    for (const delivery of detail.deliveries) {
+      const items = index.get(delivery.messageId);
+      if (items) items.push(delivery); else index.set(delivery.messageId, [delivery]);
+    }
+    return index;
+  }, [detail.deliveries]);
+  const sourceMessage = sourceMessageId ? messagesById.get(sourceMessageId) : undefined;
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const jumpToMessage = (id: string) => {
+  const jumpToMessage = useCallback((id: string) => {
     const element = document.getElementById(`group-message-${id}`);
-    element?.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
-    element?.focus({ preventScroll: true });
-  };
-  const forwardMessage = (message: GroupMessage) => {
+    if (element) {
+      element.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+      element.focus({ preventScroll: true });
+    } else {
+      const index = messagePositions.get(id);
+      if (index === undefined) return;
+      pendingMessageJump.current = id;
+      setVisibleStart(current => Math.min(current, index));
+    }
+  }, [messagePositions]);
+  const showEarlier = useCallback(() => {
+    const history = historyRef.current;
+    if (history) previousHistoryScroll.current = { top: history.scrollTop, height: history.scrollHeight };
+    setVisibleStart(current => Math.max(0, current - 200));
+  }, []);
+  useLayoutEffect(() => {
+    if (pendingMessageJump.current) {
+      const element = document.getElementById(`group-message-${pendingMessageJump.current}`);
+      element?.scrollIntoView({ block: 'center', behavior: 'instant' });
+      element?.focus({ preventScroll: true });
+      pendingMessageJump.current = null;
+      previousHistoryScroll.current = null;
+    } else if (previousHistoryScroll.current && historyRef.current) {
+      const previous = previousHistoryScroll.current;
+      historyRef.current.scrollTop = previous.top + historyRef.current.scrollHeight - previous.height;
+      previousHistoryScroll.current = null;
+    }
+  }, [firstVisible]);
+  const forwardMessage = useCallback((message: GroupMessage) => {
     const proceed = () => {
       setKind('task'); setText(message.text); setRecipients([]); setSourceMessageId(message.id); setLocalError('');
       requestAnimationFrame(() => { composerRef.current?.focus(); composerRef.current?.scrollIntoView({ block: 'center' }); });
     };
-    if (text.trim() || recipients.length || sourceMessageId) confirmReplace(message, text, proceed);
+    const current = JSON.parse(currentDraftRef.current) as GroupDraft;
+    if (current.text.trim() || current.recipients.length || current.sourceMessageId) confirmReplace(message, current.text, proceed);
     else proceed();
-  };
+  }, [confirmReplace]);
   const [localError, setLocalError] = useState('');
   const [posting, setPosting] = useState(false);
   const postingRef = useRef(false);
@@ -453,12 +496,15 @@ function GroupBoard({ detail, members, demo, busy, post, deliver, cancel, open, 
       }
     } finally { postingRef.current = false; setPosting(false); }
   };
-  return <section className="group-board"><div className="section-heading"><div><h2>群组动态</h2><span className="section-count">{detail.messages.length}</span></div><span className="section-tip">共享目标 · 明确分工 · 汇总结果</span></div><div className="board-content">
-    <div className="message-list">{detail.messages.length ? detail.messages.map((message) => <article id={`group-message-${message.id}`} tabIndex={-1} key={message.id} className={`group-message kind-${message.kind}`}><span className="message-avatar">{message.senderId ? <Command size={16} /> : '我'}</span><div className="message-body"><div className="message-heading"><strong>{message.senderName || '我'}</strong><span className="message-kind">{message.kind === 'task' ? '任务' : message.kind === 'result' ? '结果' : '记录'}</span><time>{relativeTime(message.createdAt)}</time></div>{message.sourceMessageId && <button className="message-source-link" onClick={() => jumpToMessage(message.sourceMessageId!)}><ArrowRight size={12} />来源：{detail.messages.find(item => item.id === message.sourceMessageId)?.senderName || '原消息'}<span>查看原消息</span></button>}<p>{message.text}</p>{message.recipientIds.length > 0 && <div className="message-recipients">{message.recipientIds.map((id) => <button key={id} onClick={() => open(id)}>@{members.find((member) => member.id === id)?.title || '已归档成员'}</button>)}</div>}<div className="delivery-list">{detail.deliveries.filter((delivery) => delivery.messageId === message.id).map((delivery) => {
-      const member = members.find((item) => item.id === delivery.sessionId);
+  // Keystrokes only update the composer. Historical rows keep their DOM and
+  // use indexed lookups instead of rescanning every delivery and member.
+  const messageList = useMemo(() => <div ref={historyRef} className="message-list">{detail.messages.length > 200 && <div className="history-range"><span>显示第 {firstVisible + 1}–{detail.messages.length} 条，共 {detail.messages.length} 条</span>{firstVisible > 0 && <button className="text-button" onClick={showEarlier}>显示更早 {Math.min(200, firstVisible)} 条</button>}</div>}{visibleMessages.length ? visibleMessages.map((message) => <article id={`group-message-${message.id}`} tabIndex={-1} key={message.id} className={`group-message kind-${message.kind}`}><span className="message-avatar">{message.senderId ? <Command size={16} /> : '我'}</span><div className="message-body"><div className="message-heading"><strong>{message.senderName || '我'}</strong><span className="message-kind">{message.kind === 'task' ? '任务' : message.kind === 'result' ? '结果' : '记录'}</span><time>{relativeTime(message.createdAt)}</time></div>{message.sourceMessageId && <button className="message-source-link" onClick={() => jumpToMessage(message.sourceMessageId!)}><ArrowRight size={12} />来源：{messagesById.get(message.sourceMessageId)?.senderName || '原消息'}<span>查看原消息</span></button>}<p>{message.text}</p>{message.recipientIds.length > 0 && <div className="message-recipients">{message.recipientIds.map((id) => <button key={id} onClick={() => open(id)}>@{membersById.get(id)?.title || '已归档成员'}</button>)}</div>}<div className="delivery-list">{(deliveriesByMessage.get(message.id) ?? []).map((delivery) => {
+      const member = membersById.get(delivery.sessionId);
       return <div className="delivery-item" key={delivery.id}><span><Send size={13} />{member?.title || '群组成员'}</span>{delivery.status === 'pending' ? <div><button className="text-button" disabled={!!busy || !member || member.archived} onClick={() => deliver(delivery.id, delivery.sessionId)}>{busy === `deliver:${delivery.id}` ? <LoaderCircle size={13} className="spin" /> : <ArrowRight size={13} />}{member?.backend === 'dsh' && !demo ? '发送到会话' : '填入会话'}</button><button className="icon-button" disabled={!!busy} aria-label="取消投递" title="取消投递" onClick={() => cancel(delivery.id)}><X size={13} /></button></div> : <span className="delivery-state">{delivery.status === 'sent' ? '已发送' : delivery.status === 'staged' ? '已填入 · 在私聊按回车发送' : '已取消'}{delivery.status === 'staged' && <button className="text-button" onClick={() => open(delivery.sessionId)}>进入 <ArrowRight size={12} /></button>}</span>}</div>;
-    })}</div><div className="message-actions"><button className="text-button" disabled={posting || !!busy} onClick={() => forwardMessage(message)}><ArrowRight size={13} />转交为任务</button></div></div></article>) : <div className="board-empty"><MessageSquare size={25} strokeWidth={1.5} /><h3>从一个清晰的目标开始</h3><p>记录想法，向指定成员分配任务，再把成果带回群组。</p></div>}</div>
-    <form className="message-composer" onSubmit={submit}><div className="composer-tabs">{(['note', 'task', 'result'] as const).map((value) => <button type="button" key={value} disabled={posting} aria-pressed={kind === value} className={kind === value ? 'active' : ''} onClick={() => setKind(value)}>{value === 'note' ? <MessageSquare size={14} /> : value === 'task' ? <Send size={14} /> : <CheckCheck size={14} />}{value === 'note' ? '记录' : value === 'task' ? '分配任务' : '分享结果'}</button>)}</div>{kind === 'task' && <div className="recipient-picker"><span>接收成员</span>{activeMembers.map((member) => <button type="button" disabled={posting} aria-pressed={recipients.includes(member.id)} key={member.id} className={recipients.includes(member.id) ? 'selected' : ''} onClick={() => setRecipients((current) => current.includes(member.id) ? current.filter((id) => id !== member.id) : [...current, member.id])}>{recipients.includes(member.id) && <Check size={12} />}<BackendAvatar backend={member.backend} small />{member.title}</button>)}{!activeMembers.length && <small>添加成员后，即可分配任务</small>}</div>}{sourceMessageId && <div className="composer-source"><button type="button" className="text-button" disabled={!sourceMessage} onClick={() => jumpToMessage(sourceMessageId)}><Share2 size={13} />来源：{sourceMessage?.senderName || '原消息'}<span>查看原消息</span></button><button type="button" className="icon-button" disabled={posting} aria-label="解除转交来源" title="解除来源，保留内容" onClick={() => setSourceMessageId(null)}><X size={13} /></button></div>}<textarea ref={composerRef} disabled={posting} aria-label="群组消息" onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={kind === 'task' ? '描述任务、期望结果与需要参考的上下文…' : kind === 'result' ? '把成员的结论、进展或待决策事项分享给群组…' : '记录目标、想法或决定…'} value={text} onChange={(event) => setText(event.target.value)} rows={3} required maxLength={30000} />{localError && <p role="alert" className="form-error">{localError}</p>}<div className="composer-footer"><span title="草稿保留在当前浏览器标签页；Ctrl / ⌘ + Enter 发布">{kind === 'task' ? '任务先入队，再由你投递到成员会话。' : '群组记录不会自动发送给成员。'}{text && <small className="draft-note">草稿保留 · Ctrl / ⌘ + Enter 发布</small>}</span><button className="button primary small-button" disabled={!!busy || posting || !text.trim() || (kind === 'task' && !activeMembers.length)}>{busy === 'message' ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}{kind === 'task' ? '创建任务' : '发布'}</button></div></form>
+    })}</div><div className="message-actions"><button className="text-button" disabled={posting || !!busy} onClick={() => forwardMessage(message)}><ArrowRight size={13} />转交为任务</button></div></div></article>) : <div className="board-empty"><MessageSquare size={25} strokeWidth={1.5} /><h3>从一个清晰的目标开始</h3><p>记录想法，向指定成员分配任务，再把成果带回群组。</p></div>}</div>, [detail.messages.length, firstVisible, visibleMessages, messagesById, membersById, deliveriesByMessage, busy, posting, demo, open, deliver, cancel, jumpToMessage, forwardMessage, showEarlier]);
+  return <section className="group-board"><div className="section-heading"><div><h2>群组动态</h2><span className="section-count">{detail.messages.length}</span></div><span className="section-tip">共享目标 · 明确分工 · 汇总结果</span></div><div className="board-content">
+    {messageList}
+    <form className="message-composer" onSubmit={submit}><div className="composer-tabs">{(['note', 'task', 'result'] as const).map((value) => <button type="button" key={value} disabled={posting} aria-pressed={kind === value} className={kind === value ? 'active' : ''} onClick={() => setKind(value)}>{value === 'note' ? <MessageSquare size={14} /> : value === 'task' ? <Send size={14} /> : <CheckCheck size={14} />}{value === 'note' ? '记录' : value === 'task' ? '分配任务' : '分享结果'}</button>)}</div>{kind === 'task' && <div className="recipient-picker"><span>接收成员</span>{activeMembers.map((member) => <button type="button" disabled={posting} aria-pressed={recipients.includes(member.id)} key={member.id} className={recipients.includes(member.id) ? 'selected' : ''} onClick={() => setRecipients((current) => current.includes(member.id) ? current.filter((id) => id !== member.id) : [...current, member.id])}>{recipients.includes(member.id) && <Check size={12} />}<BackendAvatar backend={member.backend} small />{member.title}</button>)}{!activeMembers.length && <small>添加成员后，即可分配任务</small>}</div>}{sourceMessageId && <div className="composer-source"><button type="button" className="text-button" disabled={!sourceMessage} onClick={() => jumpToMessage(sourceMessageId)}><Share2 size={13} />来源：{sourceMessage?.senderName || '原消息'}<span>查看原消息</span></button><button type="button" className="icon-button" disabled={posting} aria-label="解除转交来源" title="解除来源，保留内容" onClick={() => setSourceMessageId(null)}><X size={13} /></button></div>}<textarea ref={composerRef} disabled={posting} aria-label="群组消息" onKeyDown={(event) => { if (!event.nativeEvent.isComposing && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={kind === 'task' ? '描述任务、期望结果与需要参考的上下文…' : kind === 'result' ? '把成员的结论、进展或待决策事项分享给群组…' : '记录目标、想法或决定…'} value={text} onChange={(event) => setText(event.target.value)} rows={3} required maxLength={30000} />{localError && <p role="alert" className="form-error">{localError}</p>}<div className="composer-footer"><span title="草稿保留在当前浏览器标签页；Ctrl / ⌘ + Enter 发布">{kind === 'task' ? '任务先入队，再由你投递到成员会话。' : '群组记录不会自动发送给成员。'}{text && <small className="draft-note">草稿保留 · Ctrl / ⌘ + Enter 发布</small>}</span><button className="button primary small-button" disabled={!!busy || posting || !text.trim() || (kind === 'task' && !activeMembers.length)}>{busy === 'message' ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}{kind === 'task' ? '创建任务' : '发布'}</button></div></form>
   </div></section>;
 }
 

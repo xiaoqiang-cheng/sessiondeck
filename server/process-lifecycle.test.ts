@@ -89,8 +89,7 @@ http.createServer((_request,response)=>response.end('ready')).listen(port,'127.0
     const ids = (await readFile(pidFile, 'utf8')).trim().split('\n').map(Number);
     const oldPid = ids.at(-1)!;
     const stopping = bridge.stop();
-    await bridge.start();
-    await stopping;
+    await Promise.all([bridge.start(), stopping]);
     assert.equal(await live(oldPid), false, 'Previous native process survived its replacement');
     assert.equal((await readdir(directory)).filter(name => name.endsWith('.token')).length, 1, 'Only the active generation may own a token file');
     assert.equal((await readFile(pidFile, 'utf8')).trim().split('\n').length, cycle + 2);

@@ -18,6 +18,8 @@ export interface DshBridgeOptions {
   env?: NodeJS.ProcessEnv;
   /** Tests can exercise the real HTTP contract against a fixture server. */
   manageProcess?: boolean;
+  /** Total readiness budget, including every HTTP probe and response body. */
+  startupTimeoutMs?: number;
 }
 interface NativeSession { nativeSessionId: string; nativeUrl: string }
 interface DshSummary { sessionId: string; running?: boolean; cwd?: string; updatedAt?: number }
@@ -69,10 +71,12 @@ export class DshBridge {
   private process: ChildProcess | null = null;
   private owners = new WeakMap<ChildProcess, OwnedProcess>();
   private starting: Promise<void> | null = null;
+  private bootAbort: AbortController | null = null;
   private bootGeneration = 0;
   private ready = false;
   private closed = false;
   private retiring: Promise<void> = Promise.resolve();
+  private cleanups = new Set<Promise<void>>();
   private requests = new Set<AbortController>();
   private streams: WebSocket[] = [];
   private streamGeneration = 0;
@@ -89,6 +93,7 @@ export class DshBridge {
   constructor(options: DshBridgeOptions = {}) {
     const port = options.port ?? Number(process.env.SESSIONDECK_DSH_PORT ?? 4318);
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('无效的 DSH 端口');
+    if (options.startupTimeoutMs !== undefined && (!Number.isSafeInteger(options.startupTimeoutMs) || options.startupTimeoutMs <= 0)) throw new Error('无效的 DSH 启动超时');
     this.baseUrl = `http://127.0.0.1:${port}`;
     this.options = options;
   }
@@ -97,13 +102,32 @@ export class DshBridge {
     if (this.closed) throw new Error('DeepSeek Harness 桥接服务正在关闭');
     if (this.ready) return;
     if (this.starting) return this.starting;
-    const pending = this.boot(++this.bootGeneration).finally(() => { if (this.starting === pending) this.starting = null; });
+    const generation = ++this.bootGeneration;
+    const pending = this.boot(generation).finally(() => {
+      if (this.starting === pending) this.starting = null;
+      // boot() has an inner finally once a child exists. Earlier failures
+      // (missing executable, occupied port, filesystem setup) need the same
+      // abort-controller cleanup, but an older cancelled generation must not
+      // clear a replacement's controller.
+      if (this.bootGeneration === generation && !this.ready) this.bootAbort = null;
+    });
     this.starting = pending;
     return pending;
   }
 
   private async boot(generation: number): Promise<void> {
-    const assertActive = () => { if (this.bootGeneration !== generation) throw new Error('DeepSeek Harness 启动已取消'); };
+    const deadline = Date.now() + (this.options.startupTimeoutMs ?? 20_000);
+    const abort = new AbortController();
+    this.bootAbort = abort;
+    const timedOut = () => new Error('DeepSeek Harness 启动超时，请检查 dsh web 是否能正常运行');
+    const assertActive = () => {
+      if (this.bootGeneration !== generation) throw new Error('DeepSeek Harness 启动已取消');
+      if (Date.now() >= deadline) throw timedOut();
+    };
+    const probeSignal = () => {
+      assertActive();
+      return AbortSignal.any([abort.signal, AbortSignal.timeout(Math.max(1, Math.min(500, deadline - Date.now())))]);
+    };
     await this.retiring;
     assertActive();
     if (this.options.manageProcess === false) { this.ready = true; return; }
@@ -120,13 +144,15 @@ export class DshBridge {
     const dataDir = resolve(this.options.dataDir ?? process.env.SESSIONDECK_DATA_DIR ?? join(homedir(), '.sessiondeck'));
     const launchToken = randomUUID();
     const { directory, loaderPath, patchPath } = await prepareLaunch(dataDir, launchToken);
-    if (this.bootGeneration !== generation) { await rm(directory, { recursive: true, force: true }); assertActive(); }
+    try { assertActive(); }
+    catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
     const baseEnv = this.options.env ?? process.env;
     const env = { ...baseEnv, SESSIONDECK_DSH_LAUNCH_TOKEN: launchToken, NODE_OPTIONS: `${baseEnv.NODE_OPTIONS ?? ''} --import ${JSON.stringify(pathToFileURL(loaderPath).href)}`.trim() };
-    assertActive();
     const child = spawn(file, ['--profile', 'web', '--patch', patchPath, '--host', '127.0.0.1', '--port', String(port), '--no-open'], { cwd: this.options.cwd ?? process.cwd(), env, stdio: ['ignore', 'ignore', 'pipe'] });
     const closed = new Promise<void>(accept => child.once('close', () => accept()));
     const cleaned = closed.then(() => rm(directory, { recursive: true, force: true }));
+    this.cleanups.add(cleaned);
+    void cleaned.then(() => this.cleanups.delete(cleaned), () => this.cleanups.delete(cleaned));
     this.owners.set(child, new OwnedProcess(child.pid ?? 0, cleaned, signal => { child.kill(signal); }));
     // Keep cleanup covered even when the native process exits on its own.
     void cleaned.catch(() => undefined);
@@ -141,11 +167,11 @@ export class DshBridge {
       this.clearStatus(); this.abortRequests();
     });
     try {
-      for (let attempt = 0; attempt < 100; attempt++) {
+      while (Date.now() < deadline) {
         assertActive();
         if (failure) throw failure;
         try {
-          const response = await fetch(`${this.baseUrl}/sessiondeck/instance`, { signal: AbortSignal.timeout(500), redirect: 'error' });
+          const response = await fetch(`${this.baseUrl}/sessiondeck/instance`, { signal: probeSignal(), redirect: 'error' });
           const token = response.ok ? await response.text() : '';
           assertActive();
           if (failure) throw failure;
@@ -153,7 +179,7 @@ export class DshBridge {
             // The plugin route can become available before the native API has
             // finished mounting. Probe a read-only native method as well.
             const rpcId = randomUUID();
-            const api = await fetch(`${this.baseUrl}/api/session.list`, { method: 'POST', headers: { 'content-type': 'application/json', origin: this.baseUrl }, body: JSON.stringify({ type: 'client-request', rpcId, method: 'session.list', payload: {} }), signal: AbortSignal.timeout(500), redirect: 'error' });
+            const api = await fetch(`${this.baseUrl}/api/session.list`, { method: 'POST', headers: { 'content-type': 'application/json', origin: this.baseUrl }, body: JSON.stringify({ type: 'client-request', rpcId, method: 'session.list', payload: {} }), signal: probeSignal(), redirect: 'error' });
             if (api.ok) {
               const result = await api.json() as { type?: string; rpcId?: string; result?: { ok?: boolean; value?: { items?: unknown } } };
               assertActive();
@@ -161,19 +187,28 @@ export class DshBridge {
             }
           }
         } catch { /* boot not yet bound */ }
-        await delay(200);
+        assertActive();
+        await delay(Math.min(200, deadline - Date.now()), undefined, { signal: abort.signal });
       }
-      throw new Error('DeepSeek Harness 启动超时，请检查 dsh web 是否能正常运行');
+      throw timedOut();
     } catch (error) {
+      const failure = this.bootGeneration !== generation ? new Error('DeepSeek Harness 启动已取消') : Date.now() >= deadline ? timedOut() : error;
       if (this.process === child) this.process = null;
-      this.retire(child);
-      throw error;
+      // Failed start is not complete until its owned process and invocation
+      // files are gone. The bounded process grace period remains under the
+      // browser's 30s request timeout after the default 20s readiness budget.
+      await this.retire(child);
+      throw failure;
+    } finally {
+      if (this.bootAbort === abort) this.bootAbort = null;
     }
   }
 
   async stop(): Promise<void> {
     const starting = this.starting;
     this.bootGeneration++;
+    this.bootAbort?.abort();
+    this.bootAbort = null;
     this.starting = null;
     this.closeStreams();
     this.clearStatus(); this.abortRequests();
@@ -182,6 +217,7 @@ export class DshBridge {
     this.ready = false;
     await starting?.catch(() => undefined);
     await this.retiring;
+    await Promise.all([...this.cleanups]);
   }
 
   async close(): Promise<void> { this.closed = true; await this.stop(); }
@@ -193,10 +229,11 @@ export class DshBridge {
 
   private abortRequests(): void { for (const request of this.requests) request.abort(); }
 
-  private retire(child: ChildProcess): void {
+  private retire(child: ChildProcess): Promise<void> {
     const retiring = this.owners.get(child)?.stop() ?? Promise.resolve();
     this.retiring = Promise.all([this.retiring, retiring]).then(() => undefined);
     void this.retiring.catch(() => undefined);
+    return retiring;
   }
 
   private closeStreams(): void {

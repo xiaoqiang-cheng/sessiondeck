@@ -42,8 +42,7 @@ test('Codex app-server creates exact IDs, names and native forks without a model
     assert.equal(launch.env.SESSIONDECK_CODEX_TOKEN, bridge.remoteToken);
     assert.equal(process.env.SESSIONDECK_CODEX_TOKEN, undefined);
   } finally {
-    bridge.stop();
-    await delay(150);
+    await bridge.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -62,8 +61,7 @@ test('Codex bridge reports status notifications by native thread ID', async t =>
     assert.equal((await bridge.getStatus(session.nativeSessionId)).status, 'idle');
   } finally {
     unsubscribe();
-    bridge.stop();
-    await delay(150);
+    await bridge.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -78,8 +76,7 @@ test('Codex bridge does not leave runtime bearer token files after stop', async 
     await bridge.start();
     assert.ok((await readdir(dataDir)).some(name => name.startsWith('.codex-app-server-')));
   } finally {
-    bridge.stop();
-    await delay(200);
+    await bridge.close();
     assert.deepEqual((await readdir(dataDir).catch(() => [] as string[])).filter(name => name.startsWith('.codex-app-server-')), []);
     await rm(root, { recursive: true, force: true });
   }
@@ -126,7 +123,7 @@ test('Codex bridge rejects malformed/stale notifications and invalidates a disco
     assert.equal(events.at(-1), 'unknown');
   } finally {
     remove();
-    bridge.stop();
+    await bridge.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
@@ -190,7 +187,7 @@ test('Codex requests cannot collide with RPC responses; completion and interrupt
     assert.equal((await bridge.getStatus(threadId)).status, 'waiting_input');
     assert.ok(!calls.some(call => call.method === 'turn/start'));
   } finally {
-    remove(); bridge.stop();
+    remove(); await bridge.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });

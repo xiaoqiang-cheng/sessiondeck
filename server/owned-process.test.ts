@@ -76,3 +76,14 @@ test('already exited owned process cleanup does not signal any PID', async () =>
   await owner.stop();
   assert.equal(signals, 0);
 });
+
+test('failed spawn without a PID settles cleanup through close without signaling a process', { skip: process.platform !== 'linux', timeout: 5000 }, async () => {
+  const child = spawn('/definitely-missing-sessiondeck-native-fixture', [], { stdio: 'ignore' });
+  child.on('error', () => { /* expected ENOENT */ });
+  const closed = new Promise<void>(accept => child.once('close', () => accept()));
+  let signals = 0;
+  const owner = new OwnedProcess(child.pid ?? 0, closed, signal => { signals++; child.kill(signal); });
+  await owner.stop();
+  assert.equal(child.pid, undefined);
+  assert.equal(signals, 0);
+});

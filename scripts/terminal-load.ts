@@ -60,7 +60,9 @@ try {
   process.exitCode = 1;
 } finally {
   intentionalStop = true;
-  terminals.close(); store.close();
+  try { await terminals.close(); }
+  catch (error) { report.passed = false; report.error = error instanceof Error ? error.message : String(error); process.exitCode = 1; }
+  finally { store.close(); }
   Object.assign(report, { elapsedSeconds: Math.round((Date.now() - started) / 1000), receivedBytes: bytes, metrics });
   await mkdir('artifacts', { recursive: true });
   const path = `artifacts/terminal-load-${started}.json`;

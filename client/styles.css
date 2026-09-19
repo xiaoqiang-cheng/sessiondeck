@@ -286,5 +286,9 @@
 .primary-nav b,.primary-nav .active b,.section-count { color: #405b39; }
 .primary-nav .attention-count,.demo-badge,.kind-task .message-kind { color: #805817; }
 .activity-empty p { color: var(--muted); }
+.backend-setting-title p,.capability-list>span,.backend-info-note strong { color: var(--muted); }
+.capability-list .supported { color: #405b39; }
+.message-list { overflow-anchor: none; }
+.history-range { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; padding-bottom: 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .source-label,.status-badge .estimated { opacity: 1; }
 input::placeholder,textarea::placeholder { color: #6d7865; }

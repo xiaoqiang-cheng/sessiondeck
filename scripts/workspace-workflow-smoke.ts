@@ -348,6 +348,7 @@ trust_level = "trusted"
   const delivered = await api<Delivery>(`/api/deliveries/${pending.id}/send`, 'POST', {}); assert.equal(delivered.status, 'sent');
   await api(`/api/deliveries/${pending.id}/send`, 'POST', {}, 400);
   await waitFor(async () => (await card(contacts.dsh.id)).status === 'waiting_input', 'dsh did not report completion of the handed-off group task');
+  assert.ok((await card(contacts.dsh.id)).lastActivity > contacts.dsh.lastActivity, 'Native Web activity must refresh card recency without PTY output');
   assert.equal((await card(contacts.dsh.id)).unread, 1, 'Harness completion should produce one unread reminder');
   const dshHistory = await dshRpc('session.history', { sessionId: contacts.dsh.nativeSessionId, maxMessages: 100 });
   assert.ok(JSON.stringify(dshHistory).includes('WORKSPACE_DSH_HANDOFF_REPLY'));
