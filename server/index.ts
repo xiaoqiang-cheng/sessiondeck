@@ -1,0 +1,543 @@
+import express from 'express';
+import { createServer } from 'node:http';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { resolve, join } from 'node:path';
+import { statSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { WebSocketServer, WebSocket } from 'ws';
+import { Store } from './store.ts';
+import { Terminals, type LaunchCommand } from './terminal.ts';
+import { allowedRequest, validToken } from './security.ts';
+import { demoBackends, seedDemo, demoCommand } from './demo.ts';
+import { getBackendInfo, buildLaunch, discoverSessions, resolveNativeSessionId, validateNativeId, findExecutable } from './adapters.ts';
+import { DshBridge } from './dsh.ts';
+import { NativeStatusWatcher } from './native-status.ts';
+import { nativeHookPatch } from './native-events.ts';
+import { acquireInstanceLock } from './instance-lock.ts';
+import { CodexBridge } from './codex.ts';
+import type { Backend, BackendInfo, Session, AppState, SessionStatus } from '../shared/types.ts';
+
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const port = Number(process.env.PORT || process.env.SESSIONDECK_PORT || 4317);
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('SESSIONDECK_PORT 必须是 1024–65535 的端口号');
+const demo = process.env.SESSIONDECK_DEMO === '1';
+const dataDir = resolve(process.env.SESSIONDECK_DATA_DIR || join(homedir(), '.local/share', demo ? 'sessiondeck-demo' : 'sessiondeck'));
+const instanceLock = await acquireInstanceLock(dataDir);
+const store = new Store(join(dataDir, 'sessiondeck.sqlite'));
+const token = randomBytes(32).toString('hex');
+const instanceId = randomUUID();
+let stateRevision = 0;
+const terminals = new Terminals();
+const nativeStatus = new NativeStatusWatcher();
+const dsh = new DshBridge({ dataDir });
+// Codex's app-server is lazy-started on the first Codex contact. This keeps a
+// Claude/dsh-only installation usable when an older Codex CLI lacks the bridge
+// flags, while preserving exact native IDs whenever the installed CLI supports it.
+const codexBridge = new CodexBridge({ dataDir });
+const codexRuns = new Map<string, { nativeId: string; launchId: string }>();
+const app = express();
+const server = createServer(app);
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+const sse = new Set<express.Response>();
+const starting = new Set<string>();
+const stopping = new Set<string>();
+const expectedNativeIds = new Map<string, string>();
+// Native hooks and async observations from a previous launch must never attach
+// to a new run of the same contact, even when the native session ID is unchanged.
+const launchIds = new Map<string, string>();
+let closing = false;
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`;
+let backends: BackendInfo[] = demo ? demoBackends : await getBackendInfo();
+if (demo) seedDemo(store, process.cwd());
+
+function state(): AppState {
+  return { instanceId, revision: ++stateRevision, sessions: store.sessions(), groups: store.groups(), activities: store.activities(), backends, defaultCwd: process.cwd(), demo };
+}
+function broadcast() {
+  if (closing) return;
+  const chunk = `event: state\ndata: ${JSON.stringify(state())}\n\n`;
+  for (const client of sse) {
+    // A sleeping tab must not retain an unbounded queue of obsolete full states.
+    if (client.destroyed || client.writableLength > 2_097_152) { sse.delete(client); client.destroy(); }
+    else client.write(chunk);
+  }
+}
+function terminalEvent(id: string, event: unknown) {
+  const message = JSON.stringify(event);
+  for (const socket of wss.clients) {
+    if ((socket as WebSocket & { sessionId?: string }).sessionId !== id || socket.readyState !== WebSocket.OPEN) continue;
+    // Reconnection reconstructs the terminal snapshot; dropping a stalled viewer
+    // is safer than dropping arbitrary ANSI chunks or accumulating unlimited output.
+    if (socket.bufferedAmount > 2_097_152) socket.terminate();
+    else socket.send(message);
+  }
+}
+let scheduled: NodeJS.Timeout | null = null;
+function scheduleBroadcast() {
+  if (closing || scheduled) return;
+  scheduled = setTimeout(() => { scheduled = null; broadcast(); }, 180);
+}
+function fail(message: string, status = 400): never { throw Object.assign(new Error(message), { status }); }
+function text(value: unknown, name: string, max = 200, required = true): string {
+  if (typeof value !== 'string' || (required && !value.trim()) || value.length > max || /\x00/.test(value)) fail(`${name}无效（最多 ${max} 字符）`);
+  return value.trim();
+}
+function backend(value: unknown): Backend {
+  if (typeof value !== 'string' || !['claude', 'codex', 'dsh'].includes(value)) fail('未知后端');
+  return value as Backend;
+}
+function directory(value: unknown) {
+  const path = resolve(text(value, '工作目录', 4096));
+  try { if (!statSync(path).isDirectory()) fail('工作目录不是目录'); }
+  catch { fail('工作目录不存在或无法访问'); }
+  return path;
+}
+function session(id: string) { return store.session(id) || fail('会话不存在', 404); }
+function groupId(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const id = text(value, '群组 ID');
+  if (!store.group(id)) fail('群组不存在', 404);
+  return id;
+}
+function info(id: Backend) { return backends.find(b => b.id === id)!; }
+function status(id: string, patch: Partial<Session>, activity?: string) {
+  if (closing) return;
+  const old = session(id);
+  const attention = patch.status && ['waiting_input', 'waiting_approval', 'error'].includes(patch.status)
+    && (patch.lastAttentionKey ? patch.lastAttentionKey !== old.lastAttentionKey : patch.status !== old.status)
+    // The generic native waiting flag can arrive before its item-specific
+    // approval request. Enriching the identity is still the same interruption.
+    && !(patch.status === 'waiting_approval' && old.status === 'waiting_approval');
+  const updated = store.updateSession(id, { ...patch, ...(attention ? { unread: old.unread + 1 } : {}) });
+  if (activity) store.activity(id, 'status', activity);
+  scheduleBroadcast();
+  return updated;
+}
+function codexStatus(nativeId: string, event: { status: SessionStatus; detail: string; timestamp: string; attentionKey?: string }) {
+  if (closing) return;
+  const item = store.sessions().find(s => s.backend === 'codex' && s.nativeSessionId === nativeId && s.running && !s.forkPending && codexRuns.get(s.id)?.launchId === launchIds.get(s.id) && codexRuns.get(s.id)?.nativeId === nativeId);
+  if (!item || stopping.has(item.id)) return;
+  if (item.status !== event.status || item.statusDetail !== event.detail || item.statusSource !== 'native' || (event.attentionKey && item.lastAttentionKey !== event.attentionKey))
+    status(item.id, { status: event.status, statusSource: 'native', statusDetail: event.detail, lastActivity: event.timestamp, ...(event.attentionKey ? { lastAttentionKey: event.attentionKey } : {}) });
+}
+codexBridge.onStatus(codexStatus);
+async function ensureCodexBridge() {
+  await codexBridge.start();
+  return codexBridge;
+}
+function observeNative(item: Session) {
+  if (demo || !item.running || closing || codexRuns.has(item.id)) return;
+  const launchId = launchIds.get(item.id);
+  nativeStatus.start(item, event => {
+    if (closing || launchIds.get(item.id) !== launchId || !store.session(item.id)?.running) return;
+    status(item.id, { status: event.status, statusSource: 'native', statusDetail: event.detail, lastActivity: event.timestamp });
+  });
+}
+
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  if (!allowedRequest(req, port)) return res.status(403).json({ error: '只接受本机同源请求' });
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+app.use(express.json({ limit: '128kb' }));
+app.use('/api', (req, res, next) => {
+  if (!['GET', 'HEAD'].includes(req.method) && !validToken(req.headers['x-sessiondeck-token'], token))
+    return res.status(403).json({ error: '操作凭证已过期，请刷新页面' });
+  if (!['GET', 'HEAD'].includes(req.method) && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)))
+    return res.status(400).json({ error: '请求正文必须是 JSON 对象' });
+  next();
+});
+
+app.get('/api/config', (_req, res) => res.json({ csrfToken: token }));
+app.get('/api/state', (_req, res) => res.json(state()));
+app.get('/api/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  res.write(`event: state\ndata: ${JSON.stringify(state())}\n\n`);
+  sse.add(res);
+  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20_000);
+  req.on('close', () => { sse.delete(res); clearInterval(heartbeat); });
+});
+
+app.post('/api/backends/refresh', async (_req, res) => { backends = demo ? demoBackends : await getBackendInfo(); broadcast(); res.json(backends); });
+app.get('/api/discover', async (req, res) => {
+  const filter = req.query.backend ? backend(req.query.backend) : undefined;
+  if (demo) return res.json({ sessions: [{ backend: 'codex', nativeSessionId: 'demo-import', title: '可导入的演示会话', cwd: process.cwd(), lastActivity: new Date().toISOString() }] });
+  const existing = new Set(store.sessions().filter(s => !s.forkPending).map(s => `${s.backend}:${s.nativeSessionId}`));
+  const found = await discoverSessions(filter);
+  res.json({ sessions: found.filter(s => !existing.has(`${s.backend}:${s.nativeSessionId}`)) });
+});
+app.post('/api/import', (req, res) => {
+  const id = backend(req.body.backend);
+  const nativeSessionId = text(req.body.nativeSessionId, '原生会话 ID', 200);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(nativeSessionId)) fail('原生会话 ID 格式无效');
+  if (!demo) validateNativeId(id, nativeSessionId);
+  if (!info(id).capabilities.resume) fail('这个后端尚不支持恢复会话');
+  const existing = store.sessions().find(s => s.backend === id && s.nativeSessionId === nativeSessionId && !s.forkPending);
+  if (existing) return res.json(existing);
+  const item = store.addSession({ backend: id, title: text(req.body.title, '名称'), cwd: directory(req.body.cwd), nativeSessionId, origin: 'imported', status: 'unknown', statusDetail: '已导入历史，启动后通过原生能力恢复' });
+  store.activity(item.id, 'import', `导入了 ${item.title}`); broadcast(); res.status(201).json(item);
+});
+app.post('/api/sessions', (req, res) => {
+  const id = backend(req.body.backend);
+  const item = store.addSession({ backend: id, title: text(req.body.title, '名称'), cwd: directory(req.body.cwd), groupId: groupId(req.body.groupId) });
+  store.activity(item.id, 'create', `创建了 ${item.title}`); broadcast(); res.status(201).json(item);
+});
+app.patch('/api/sessions/:id', (req, res) => {
+  const item = session(String(req.params.id));
+  const patch: Partial<Session> = {};
+  if ('title' in req.body) patch.title = text(req.body.title, '名称');
+  for (const key of ['pinned', 'archived'] as const) if (key in req.body) {
+    if (typeof req.body[key] !== 'boolean') fail('无效的布尔值');
+    if (key === 'archived' && starting.has(item.id)) fail('会话正在启动，请稍后再归档');
+    if (key === 'archived' && req.body[key] && item.running) fail('请先停止会话，再归档');
+    patch[key] = req.body[key];
+  }
+  if ('status' in req.body) {
+    const choice = req.body.status as SessionStatus;
+    if (!['idle', 'waiting_input', 'waiting_approval', 'unknown'].includes(choice)) fail('不支持的手动状态');
+    Object.assign(patch, { status: choice, statusSource: 'manual', statusDetail: '由你手动标记' });
+  }
+  const updated = store.updateSession(item.id, patch); broadcast(); res.json(updated);
+});
+app.post('/api/sessions/:id/read', (req, res) => { const item = store.updateSession(session(String(req.params.id)).id, { unread: 0 }); broadcast(); res.json(item); });
+
+app.post('/api/native-event/:id', (req, res) => {
+  const item = session(String(req.params.id));
+  if (demo || !item.running || req.body?.source !== item.backend || typeof req.query.launch !== 'string' || launchIds.get(item.id) !== req.query.launch) return res.json({ ok: true });
+  const patch = nativeHookPatch(item, req.body?.payload, expectedNativeIds.get(item.id));
+  if (!patch || store.sessions().some(other => other.id !== item.id && other.backend === item.backend && !other.forkPending && other.nativeSessionId === patch.nativeSessionId)) return res.json({ ok: true });
+  // Replayed Stop notifications should not repeatedly increment unread counts.
+  const changed = item.status !== patch.status || item.nativeSessionId !== patch.nativeSessionId || item.forkPending;
+  if (!changed) return res.json({ ok: true });
+  status(item.id, { ...patch, lastActivity: new Date().toISOString() }, patch.statusDetail);
+  observeNative(session(item.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/sessions/:id/fork', async (req, res) => {
+  const parent = session(String(req.params.id));
+  if (!info(parent.backend).capabilities.fork) fail('当前后端没有可用的原生 Fork 能力');
+  if (!parent.nativeSessionId || parent.forkPending) fail('原生会话 ID 尚未确定，请先启动来源会话并完成初始化');
+  const title = text(req.body.title || `${parent.title} · 分支`, '名称');
+  const cwd = req.body.cwd ? directory(req.body.cwd) : parent.cwd;
+  const targetGroupId = groupId(req.body.groupId);
+  let child: Session;
+  if (parent.backend === 'dsh' && !demo) {
+    const native = await dsh.forkSession(parent.nativeSessionId, cwd);
+    child = store.addSession({ backend: parent.backend, title, cwd, groupId: targetGroupId, parentId: parent.id, origin: 'forked', ...native, running: true, status: 'idle', statusSource: 'native', statusDetail: '已通过原生能力 Fork，点击进入' });
+  } else if (parent.backend === 'codex' && !demo && info('codex').capabilities.nativeControl) {
+    if (!parent.nativeSessionId || parent.forkPending) fail('Codex 原生会话 ID 尚未确定，请先启动来源会话');
+    const bridge = await ensureCodexBridge();
+    // Codex's native fork returns a new exact thread immediately. Persist that
+    // identity before exposing the card; a failed fork never becomes a fake child.
+    const native = await bridge.forkSession(parent.nativeSessionId, cwd);
+    child = store.addSession({ backend: parent.backend, title, cwd, groupId: targetGroupId, parentId: parent.id, origin: 'forked', nativeSessionId: native.nativeSessionId, running: false, status: 'idle', statusSource: 'native', statusDetail: '已通过 Codex 原生能力 Fork，点击进入' });
+    bridge.releaseSession(native.nativeSessionId);
+  } else {
+    child = store.addSession({ backend: parent.backend, title, cwd, groupId: targetGroupId, parentId: parent.id, origin: 'forked', nativeSessionId: demo ? `demo-${randomUUID()}` : parent.nativeSessionId, forkPending: !demo, statusDetail: demo ? '演示分支已创建' : '待启动：将调用原生 Fork，原会话保持独立' });
+  }
+  store.activity(child.id, 'fork', `从 ${parent.title} 分叉为 ${child.title}`); broadcast(); res.status(201).json(child);
+});
+
+app.post('/api/sessions/:id/start', async (req, res) => {
+  const item = session(String(req.params.id));
+  if (item.archived) fail('请先恢复归档联系人');
+  if (stopping.has(item.id)) fail('会话正在停止，请稍后再启动');
+  if (item.running || starting.has(item.id)) return res.json(item);
+  if (!info(item.backend).installed) fail(`${info(item.backend).label} 尚未安装或不可用`);
+  directory(item.cwd);
+  starting.add(item.id);
+  const launchId = randomUUID();
+  launchIds.set(item.id, launchId);
+  expectedNativeIds.delete(item.id);
+  try {
+    if (item.backend === 'dsh' && !demo) {
+      const native = item.nativeSessionId ? await dsh.openSession(item.nativeSessionId) : await dsh.createSession(item.cwd, item.title);
+      status(item.id, { ...native, running: true, status: 'idle', statusSource: 'native', statusDetail: '原生 Web 会话已就绪', forkPending: false, lastActivity: new Date().toISOString() });
+    } else if (item.backend === 'codex' && !demo && info('codex').capabilities.nativeControl) {
+        const bridge = await ensureCodexBridge();
+        const executable = await findExecutable('codex');
+        if (!executable) fail('Codex 原生命令已不可用，请重新检测后端');
+        let native;
+        if (item.forkPending) {
+          if (!item.nativeSessionId) fail('Codex Fork 来源 ID 尚未确定');
+          native = await bridge.forkSession(item.nativeSessionId, item.cwd);
+        } else if (item.nativeSessionId) {
+          native = await bridge.openSession(item.nativeSessionId, item.cwd);
+        } else {
+          native = await bridge.createSession(item.cwd, item.title);
+        }
+        // Persist native identity even if the subsequent PTY fails. Retrying
+        // this card must resume the created thread instead of making another.
+        status(item.id, { nativeSessionId: native.nativeSessionId, forkPending: false });
+        const command = bridge.remoteLaunch(native.nativeSessionId, executable, item.cwd);
+        codexRuns.set(item.id, { nativeId: native.nativeSessionId, launchId });
+        status(item.id, { running: true, status: 'unknown', statusSource: 'process', statusDetail: '正在连接 Codex 原生终端', lastActivity: new Date().toISOString() });
+        terminals.start(session(item.id), command);
+        await bridge.getStatus(native.nativeSessionId);
+    } else {
+      const command: LaunchCommand = demo ? demoCommand() : await buildLaunch(item);
+      if (!demo && item.backend === 'claude') {
+        const hookCommand = [process.execPath, join(root, 'server/native-hook.cjs'), `http://127.0.0.1:${port}/api/native-event/${item.id}?launch=${launchId}`, token, 'claude'].map(shellQuote).join(' ');
+        const hooks = Object.fromEntries(['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'Notification', 'PermissionRequest'].map(event => [event, [{ hooks: [{ type: 'command', command: hookCommand, timeout: 3 }] }]]));
+        command.args.push('--settings', JSON.stringify({ hooks }));
+      }
+      if (!demo && item.backend === 'codex') {
+        const notify = [process.execPath, join(root, 'server/native-hook.cjs'), `http://127.0.0.1:${port}/api/native-event/${item.id}?launch=${launchId}`, token, 'codex'];
+        command.args.push('-c', `notify=${JSON.stringify(notify)}`);
+      }
+      if (command.nativeSessionId) expectedNativeIds.set(item.id, command.nativeSessionId);
+      status(item.id, { running: true, status: 'unknown', statusSource: 'process', statusDetail: '正在连接原生终端' });
+      terminals.start(item, command);
+      status(item.id, { lastActivity: new Date().toISOString() });
+      observeNative(session(item.id));
+      if (!demo) void resolveIdentity(item.id, new Date().toISOString(), launchId);
+    }
+    store.activity(item.id, 'start', `打开了 ${item.title}`); broadcast(); res.json(session(item.id));
+  } catch (error) {
+    if (launchIds.get(item.id) === launchId) launchIds.delete(item.id);
+    expectedNativeIds.delete(item.id);
+    const nativeRun = codexRuns.get(item.id);
+    codexRuns.delete(item.id);
+    if (nativeRun) codexBridge.releaseSession(nativeRun.nativeId);
+    status(item.id, { running: false, status: 'error', statusSource: 'process', statusDetail: error instanceof Error ? error.message : '启动失败' });
+    throw error;
+  } finally { starting.delete(item.id); }
+});
+app.post('/api/sessions/:id/stop', async (req, res) => {
+  const item = session(String(req.params.id));
+  if (starting.has(item.id)) fail('会话正在启动，请稍后再停止');
+  if (!item.running || stopping.has(item.id)) return res.json(item);
+  stopping.add(item.id);
+  try {
+    if (item.backend === 'dsh' && !demo) {
+      if (item.nativeSessionId) await dsh.stopSession(item.nativeSessionId);
+      launchIds.delete(item.id);
+      status(item.id, { running: false, nativeUrl: null, status: 'stopped', statusSource: 'native', statusDetail: '已取消当前原生任务，可重新进入会话' });
+    } else if (item.backend === 'codex' && !demo && codexRuns.has(item.id) && item.nativeSessionId) {
+      // Interrupt only this thread's active turn, then close its TUI. The
+      // native session remains resumable and its approvals stay Codex-owned.
+      await codexBridge.stopSession(item.nativeSessionId);
+      terminals.stop(item.id);
+      codexBridge.releaseSession(item.nativeSessionId);
+      status(item.id, { running: false, status: 'stopped', statusSource: 'native', statusDetail: '已停止 Codex 当前任务，可重新进入会话' });
+    } else {
+      terminals.stop(item.id);
+      status(item.id, { running: false, status: 'stopped', statusSource: 'process', statusDetail: '已停止，可恢复原生会话' });
+    }
+    broadcast(); res.json(session(item.id));
+  } finally { stopping.delete(item.id); }
+});
+
+app.post('/api/groups', (req, res) => {
+  const group = store.addGroup(text(req.body.title, '群组名称'), text(req.body.goal ?? '', '共同目标', 4000, false));
+  store.activity(null, 'group', `创建了群组 ${group.title}`); broadcast(); res.status(201).json(group);
+});
+app.patch('/api/groups/:id', (req, res) => {
+  const patch: { title?: string; goal?: string } = {};
+  if ('title' in req.body) patch.title = text(req.body.title, '群组名称');
+  if ('goal' in req.body) patch.goal = text(req.body.goal, '共同目标', 4000, false);
+  const group = store.updateGroup(String(req.params.id), patch); broadcast(); res.json(group);
+});
+app.get('/api/groups/:id', (req, res) => res.json(store.groupDetail(String(req.params.id))));
+app.post('/api/groups/:id/messages', (req, res) => {
+  const id = String(req.params.id);
+  const kind = req.body.kind ?? 'note';
+  if (!['note', 'task', 'result'].includes(kind)) fail('消息类型无效');
+  const ids = req.body.recipientIds ?? [];
+  if (!Array.isArray(ids) || ids.length > 50 || ids.some(x => typeof x !== 'string')) fail('收件人无效');
+  const senderId = req.body.senderId ? text(req.body.senderId, '来源会话') : null;
+  const sourceMessageId = req.body.sourceMessageId ? text(req.body.sourceMessageId, '转交来源') : null;
+  const message = store.addMessage({ groupId: id, kind, text: text(req.body.text, '消息', 30_000), recipientIds: ids, senderId, senderName: senderId ? session(senderId).title : '你', sourceMessageId });
+  broadcast(); res.status(201).json(message);
+});
+const deliveryLocks = new Set<string>();
+app.post('/api/deliveries/:id/send', async (req, res) => {
+  const id = String(req.params.id);
+  const delivery = store.delivery(id) || fail('投递记录不存在', 404);
+  if (delivery.status !== 'pending' || deliveryLocks.has(id)) fail('消息已处理或正在处理');
+  const target = session(delivery.sessionId);
+  if (!target.running || target.archived) fail('请先进入并启动目标会话');
+  if (target.status === 'waiting_approval') fail('请先在原生会话中处理当前审批，再填入任务');
+  deliveryLocks.add(id);
+  try {
+    let deliveryStatus: 'sent' | 'staged';
+    if (target.backend === 'dsh' && !demo) {
+      if (!target.nativeSessionId) fail('原生会话尚未准备好');
+      await dsh.prompt(target.nativeSessionId!, delivery.text); deliveryStatus = 'sent';
+    } else {
+      terminals.stage(target.id, delivery.text); deliveryStatus = 'staged';
+    }
+    const updated = store.updateDelivery(id, deliveryStatus);
+    store.activity(target.id, 'delivery', deliveryStatus === 'staged' ? '群组消息已填入终端，等待你按回车发送' : '群组消息已发送到原生会话');
+    broadcast(); res.json(updated);
+  } finally { deliveryLocks.delete(id); }
+});
+app.post('/api/deliveries/:id/cancel', (req, res) => {
+  const id = String(req.params.id);
+  if (deliveryLocks.has(id)) fail('消息正在发送，请稍后再操作');
+  const item = store.updateDelivery(id, 'cancelled'); broadcast(); res.json(item);
+});
+
+const identityTimers = new Set<NodeJS.Timeout>();
+async function resolveIdentity(id: string, startedAt: string, launchId: string, attempt = 0) {
+  if (closing || launchIds.get(id) !== launchId) return;
+  const item = store.session(id);
+  if (!item || !item.running || (item.nativeSessionId && !item.forkPending)) return;
+  // A timestamp/cwd match is not proof of identity: another CLI may start there.
+  // Codex reports its thread ID through the native completion notification.
+  const expected = expectedNativeIds.get(id);
+  if (!expected) return;
+  try {
+    const exclude = store.sessions().filter(s => s.id !== id && s.nativeSessionId && !s.forkPending).map(s => s.nativeSessionId!);
+    const nativeSessionId = await resolveNativeSessionId(item, startedAt, exclude);
+    if (closing || launchIds.get(id) !== launchId || !store.session(id)?.running) return;
+    const alreadyLinked = store.sessions().some(other => other.id !== id && !other.forkPending && other.nativeSessionId === nativeSessionId && other.backend === item.backend);
+    if (nativeSessionId === expected && !alreadyLinked && (!item.forkPending || nativeSessionId !== item.nativeSessionId)) {
+      status(id, { nativeSessionId, forkPending: false }); observeNative(session(id)); return;
+    }
+  } catch { /* Not persisted yet; keep the card honest and retry. */ }
+  const timer = setTimeout(() => { identityTimers.delete(timer); void resolveIdentity(id, startedAt, launchId, attempt + 1); }, attempt < 30 ? 2000 : 10_000);
+  identityTimers.add(timer);
+}
+
+terminals.on('data', (id: string, data: string) => {
+  terminalEvent(id, { type: 'data', data });
+  const item = store.session(id);
+  if (item && Date.now() - Date.parse(item.lastActivity) > 2000) { store.updateSession(id, { lastActivity: new Date().toISOString() }); scheduleBroadcast(); }
+});
+terminals.on('hint', (id: string, hint: { status: SessionStatus; detail: string }) => {
+  if (session(id).statusSource === 'native') return;
+  if (session(id).status !== hint.status) status(id, { status: hint.status, statusSource: 'terminal', statusDetail: hint.detail }, hint.detail);
+});
+terminals.on('input', (id: string, data: string) => {
+  const item = session(id);
+  // Claude does not emit Stop when Escape interrupts a turn or rejects a tool.
+  // A key press is not proof of cancellation (it can also dismiss a menu), so
+  // stop asserting the preceding execution state and wait for native evidence.
+  // Escape sequences such as arrow keys and bracketed paste are not cancels.
+  if (!demo && !codexRuns.has(id) && item.statusSource === 'native'
+    && ['running', 'waiting_approval'].includes(item.status) && (data === '\x1b' || data === '\x03')) {
+    status(id, { status: 'unknown', statusSource: 'process', statusDetail: '已发送取消键，请在原生界面确认是否中断', lastActivity: new Date().toISOString() });
+    return;
+  }
+  // Typing in a native prompt is not evidence that its agent started a turn.
+  // Keep authoritative approval/execution state until the backend changes it.
+  if (session(id).statusSource !== 'native' && session(id).status !== 'unknown') status(id, { status: 'unknown', statusSource: 'process', statusDetail: '已发送输入，等待后端状态', lastActivity: new Date().toISOString() });
+});
+terminals.on('exit', (id: string, exitCode: number) => {
+  nativeStatus.stop(id);
+  launchIds.delete(id);
+  expectedNativeIds.delete(id);
+  const nativeRun = codexRuns.get(id);
+  codexRuns.delete(id);
+  // A remote TUI and its app-server have different process lifetimes. If a
+  // TUI dies, interrupt its thread before releasing the observer. A restart is
+  // held until that cleanup finishes, so a late interrupt cannot hit a new turn.
+  if (nativeRun && !stopping.has(id)) {
+    stopping.add(id);
+    void codexBridge.stopSession(nativeRun.nativeId).catch(error => {
+      if (!closing) status(id, { status: 'error', statusSource: 'native', statusDetail: `终端已退出，无法确认任务取消：${error instanceof Error ? error.message : '连接异常'}` });
+    }).finally(() => { codexBridge.releaseSession(nativeRun.nativeId); stopping.delete(id); });
+  }
+  status(id, { running: false, status: exitCode === 0 ? 'stopped' : 'error', statusSource: 'process', statusDetail: `原生进程已退出（${exitCode}）` }, '会话进程已退出');
+  terminalEvent(id, { type: 'exit', exitCode });
+});
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
+  if (!url.pathname.startsWith('/api/terminal/')) return; // Vite owns its own HMR upgrade.
+  if (!allowedRequest(req, port) || !validToken(url.searchParams.get('token'), token)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  const id = url.pathname.slice('/api/terminal/'.length);
+  if (!store.session(id)) { socket.destroy(); return; }
+  wss.handleUpgrade(req, socket, head, ws => {
+    ws.on('error', () => ws.close());
+    (ws as WebSocket & { sessionId: string }).sessionId = id;
+    ws.send(JSON.stringify({ type: 'data', data: terminals.buffer(id) }));
+    ws.on('message', raw => {
+      try {
+        const message = JSON.parse(raw.toString());
+        if (message.type === 'input' && typeof message.data === 'string' && message.data.length <= 32768) terminals.input(id, message.data);
+        else if (message.type === 'resize') terminals.resize(id, message.cols, message.rows);
+      } catch (error) { ws.send(JSON.stringify({ type: 'error', error: error instanceof Error ? error.message : '终端输入失败' })); }
+    });
+  });
+});
+
+let nativePolling = false;
+const nativePoll = setInterval(async () => {
+  if (demo || closing || nativePolling) return;
+  nativePolling = true;
+  try {
+    const pending = store.sessions().filter(s => s.running && s.nativeSessionId && (s.backend === 'dsh' || codexRuns.has(s.id)));
+    const sample = async (item: Session) => {
+      const launchId = launchIds.get(item.id);
+      const next = item.backend === 'codex' ? await codexBridge.getStatus(item.nativeSessionId!) : await dsh.getStatus(item.nativeSessionId!);
+      if (closing) return;
+      const current = store.session(item.id);
+      if (!current?.running || stopping.has(item.id) || current.nativeSessionId !== item.nativeSessionId || launchIds.get(item.id) !== launchId) return;
+      const attentionKey = 'attentionKey' in next && typeof next.attentionKey === 'string' ? next.attentionKey : undefined;
+      if (current.status !== next.status || current.statusDetail !== next.detail || (attentionKey && current.lastAttentionKey !== attentionKey))
+        status(item.id, { status: next.status, statusSource: 'native', statusDetail: next.detail || '来自原生会话状态', ...(attentionKey ? { lastAttentionKey: attentionKey } : {}) });
+    };
+    // One unresponsive member must not delay status updates for every other
+    // backend. Keep concurrency bounded even with a large contact list.
+    await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+      while (pending.length && !closing) {
+        const item = pending.shift()!;
+        try { await sample(item); }
+        catch { /* A later poll retries; bridges report recognizable failures. */ }
+      }
+    }));
+  } finally { nativePolling = false; }
+}, 3000);
+nativePoll.unref();
+
+app.use('/api', (_req, res) => res.status(404).json({ error: '接口不存在' }));
+if (process.argv.includes('--dev')) {
+  const { createServer: createViteServer } = await import('vite');
+  const vite = await createViteServer({ root, server: { middlewareMode: true, hmr: { server } }, appType: 'spa' });
+  app.use(vite.middlewares);
+} else {
+  const dist = join(root, 'dist/client');
+  if (!existsSync(join(dist, 'index.html'))) console.warn('尚未构建前端，请先 npm run build，或使用 npm run dev。');
+  app.use(express.static(dist));
+  app.get('/{*path}', (_req, res) => res.sendFile(join(dist, 'index.html')));
+}
+app.use((error: Error & { status?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  res.status(error.status || 400).json({ error: error.message || '操作失败' });
+});
+
+server.once('error', error => {
+  console.error((error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? `端口 ${port} 已被占用，请设置 SESSIONDECK_PORT 为其他端口。` : error.message);
+  shutdown(1);
+});
+server.listen(port, '127.0.0.1', () => console.log(`SessionDeck${demo ? ' [演示模式，不调用真实模型]' : ''} → http://127.0.0.1:${port}\n本地数据：${dataDir}`));
+function shutdown(exitCode = 0) {
+  if (closing) return; closing = true;
+  clearInterval(nativePoll);
+  if (scheduled) clearTimeout(scheduled);
+  for (const timer of identityTimers) clearTimeout(timer);
+  terminals.removeAllListeners(); nativeStatus.close();
+  for (const client of sse) client.end();
+  for (const ws of wss.clients) ws.terminate();
+  const httpClosed = new Promise<void>(accept => server.close(() => accept()));
+  server.closeAllConnections();
+  // Keep the storage lease until native children and their callbacks are gone.
+  // Exiting directly in server.close used to orphan a slow native process and
+  // let a replacement instance race it against the same native history.
+  void (async () => {
+    const results = await Promise.allSettled([httpClosed, terminals.close(), dsh.close(), codexBridge.close()]);
+    for (const result of results) if (result.status === 'rejected') { console.error('关闭原生资源失败：', result.reason instanceof Error ? result.reason.message : String(result.reason)); exitCode = 1; }
+    try { store.close(); }
+    finally { await instanceLock.release(); }
+    process.exit(exitCode);
+  })().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
+}
+process.on('SIGTERM', () => shutdown()); process.on('SIGINT', () => shutdown());

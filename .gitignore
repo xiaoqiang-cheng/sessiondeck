@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.sessiondeck/
+*.log
+.env
+.env.*
+!.env.example
+artifacts/

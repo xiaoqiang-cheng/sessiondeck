@@ -1,0 +1,51 @@
+{
+  "name": "sessiondeck",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first web home for Claude Code, Codex and DeepSeek Harness sessions",
+  "scripts": {
+    "dev": "tsx watch server/index.ts --dev",
+    "start": "tsx server/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "test": "tsx --test server/*.test.ts scripts/fixtures/*.test.ts",
+    "check": "tsc --noEmit",
+    "test:web": "playwright test",
+    "verify": "npm run build && npm test && npm run test:web",
+    "doctor": "tsx scripts/doctor.ts",
+    "test:soak": "tsx scripts/soak.ts",
+    "test:smoke:dsh": "tsx scripts/dsh-workflow-smoke.ts",
+    "test:smoke:codex": "tsx scripts/codex-workflow-smoke.ts",
+    "test:terminal-load": "tsx scripts/terminal-load.ts",
+    "test:smoke:claude": "tsx scripts/claude-workflow-smoke.ts",
+    "test:smoke:workspace": "tsx scripts/workspace-workflow-smoke.ts",
+    "backup": "tsx scripts/backup.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^6.0.0",
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.2.0"
+  }
+}
