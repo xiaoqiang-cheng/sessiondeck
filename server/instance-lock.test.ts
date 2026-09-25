@@ -21,7 +21,7 @@ test('only one service can recover a data directory, including symlink aliases',
   await assert.rejects(acquireInstanceLock(dir), /已有 SessionDeck 实例/);
 });
 
-test('a killed owner releases the kernel lock without stale files or PID recovery', { skip: process.platform !== 'linux', timeout: 10_000 }, async t => {
+test('a killed owner releases the kernel lock without stale files or PID recovery', { timeout: 10_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'sessiondeck-instance-crash-'));
   const module = new URL('./instance-lock.ts', import.meta.url).href;
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `import { acquireInstanceLock } from ${JSON.stringify(module)}; await acquireInstanceLock(process.argv[1]); console.log('locked'); setInterval(() => {}, 1000);`, dir], { stdio: ['ignore', 'pipe', 'pipe'] });

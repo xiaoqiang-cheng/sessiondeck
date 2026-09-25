@@ -51,7 +51,7 @@ try {
     if (sampleNumber % 6 === 1) console.log(JSON.stringify(metric));
   }
   intentionalStop = true;
-  terminals.stop(session.id);
+  await terminals.stop(session.id);
   assert.match(terminals.buffer(session.id), /进程已退出/);
   assert.ok(bytes > 64_000, 'fixture did not produce substantial output');
   report.passed = true;

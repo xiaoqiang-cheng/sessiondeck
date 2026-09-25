@@ -63,6 +63,9 @@ export interface GroupMessage {
   /** Existing message this handoff continues; always from the same group. */
   sourceMessageId?: string | null;
   createdAt: string;
+  /** Persistent change cursor and chronological page position. */
+  revision?: number;
+  sequence?: number;
 }
 
 export interface Delivery {
@@ -70,9 +73,20 @@ export interface Delivery {
   messageId: string;
   sessionId: string;
   text: string;
-  status: 'pending' | 'staged' | 'sent' | 'cancelled';
+  status: 'pending' | 'sending' | 'unknown' | 'staged' | 'sent' | 'cancelled';
   createdAt: string;
   sentAt: string | null;
+  attempts?: DeliveryAttempt[];
+  lastError?: string;
+}
+
+export interface DeliveryAttempt {
+  id: string;
+  mode: 'sent' | 'staged';
+  startedAt: string;
+  finishedAt?: string;
+  outcome: 'sending' | 'unknown' | 'rejected' | 'sent' | 'staged';
+  resolution?: 'confirmed' | 'not_received' | 'cancelled';
 }
 
 export interface Activity {
@@ -98,5 +112,18 @@ export interface AppState {
 export interface GroupDetail {
   group: Group;
   messages: GroupMessage[];
-  deliveries: Delivery[];
+  deliveries: Omit<Delivery, 'text'>[];
+  page?: { before: number | null; total: number };
+  revision?: string;
+  nextSince?: string | null;
+}
+
+export interface StatePatch {
+  instanceId: string;
+  baseRevision: number;
+  revision: number;
+  sessions?: Session[];
+  groups?: Group[];
+  activities?: { upsert: Activity[]; remove: string[] };
+  backends?: BackendInfo[];
 }

@@ -1,5 +1,5 @@
 import { backup, DatabaseSync } from 'node:sqlite';
-import { chmod, link, lstat, mkdir, mkdtemp, open, rm, stat } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, open, readlink, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, parse, resolve, sep } from 'node:path';
 
@@ -46,6 +46,12 @@ async function safeDirectory(path: string, create: boolean): Promise<void> {
       catch (mkdirError) { if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError; }
       entry = await lstat(current);
     }
+    // macOS itself exposes /var and /tmp through root-owned aliases. They are
+    // not user-selected backup redirections; every remaining component is
+    // still checked, including symlinks below these system directories.
+    if (process.platform === 'darwin' && entry.isSymbolicLink() && entry.uid === 0
+      && ['/var', '/tmp', '/etc'].includes(current)
+      && resolve(dirname(current), await readlink(current)) === `/private${current}`) continue;
     if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error(`备份路径必须是真实目录，不能包含符号链接：${current}`);
   }
 }

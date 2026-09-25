@@ -26,12 +26,14 @@ export function inferTerminalStatus(text: string): { status: SessionStatus; deta
 export class Terminals extends EventEmitter {
   private live = new Map<string, LiveTerminal>();
   private ended = new Map<string, string>();
-  private retiring = new Set<Promise<void>>();
+  private stopping = new Map<string, Promise<void>>();
   private closed = false;
   has(id: string) { return this.live.has(id); }
+  isStopping(id: string) { return this.stopping.has(id); }
   buffer(id: string) { return this.live.get(id)?.replay.snapshot() ?? this.ended.get(id) ?? ''; }
   start(session: Session, command: LaunchCommand) {
     if (this.closed) throw new Error('终端管理服务正在关闭');
+    if (this.stopping.has(session.id)) throw new Error('会话正在停止，请等待原生进程退出');
     if (this.live.has(session.id)) return;
     const env = { ...process.env, ...command.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>;
     delete env.SESSIONDECK_TOKEN;
@@ -57,6 +59,7 @@ export class Terminals extends EventEmitter {
     });
     child.onExit(event => {
       exited();
+      if (this.stopping.has(session.id)) return; // stop owns the final event, including descendant cleanup.
       if (this.live.get(session.id) !== live) return;
       this.remember(session.id, live, event.exitCode);
       this.live.delete(session.id);
@@ -64,6 +67,7 @@ export class Terminals extends EventEmitter {
     });
   }
   input(id: string, data: string) {
+    if (this.stopping.has(id)) throw new Error('会话正在停止，暂时无法输入');
     const live = this.live.get(id);
     if (!live) throw new Error('会话尚未启动或已经退出');
     live.tail = '';
@@ -82,13 +86,21 @@ export class Terminals extends EventEmitter {
     live?.replay.resize(cols, rows);
     live?.process.resize(cols, rows);
   }
-  stop(id: string) {
+  stop(id: string): Promise<void> {
+    const pending = this.stopping.get(id);
+    if (pending) return pending;
     const live = this.live.get(id);
-    if (!live) return;
-    this.remember(id, live, 0);
-    this.live.delete(id);
-    this.retire(live);
-    this.emit('exit', id, 0);
+    if (!live) return Promise.resolve();
+    // Install the per-contact barrier before signaling. A failed cleanup keeps
+    // the barrier and live entry: never claim success or launch a replacement.
+    const stopped = Promise.resolve().then(() => live.owner.stop('SIGHUP')).then(() => {
+      this.remember(id, live, 0);
+      this.live.delete(id);
+      this.stopping.delete(id);
+      this.emit('exit', id, 0);
+    });
+    this.stopping.set(id, stopped);
+    return stopped;
   }
   private remember(id: string, live: LiveTerminal, exitCode: number) {
     this.ended.delete(id);
@@ -96,15 +108,9 @@ export class Terminals extends EventEmitter {
     live.replay.close();
     while (this.ended.size > 10) this.ended.delete(this.ended.keys().next().value!);
   }
-  private retire(live: LiveTerminal) {
-    const pending = live.owner.stop('SIGHUP');
-    this.retiring.add(pending);
-    void pending.then(() => this.retiring.delete(pending), () => undefined);
-  }
   async close(): Promise<void> {
     this.closed = true;
-    for (const live of this.live.values()) { live.replay.close(); this.retire(live); }
-    this.live.clear(); this.ended.clear();
-    await Promise.all(this.retiring);
+    await Promise.all([...this.live.keys()].map(id => this.stop(id)));
+    this.ended.clear();
   }
 }

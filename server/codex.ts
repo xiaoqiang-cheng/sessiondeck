@@ -10,6 +10,7 @@ import WebSocket from 'ws';
 import type { SessionStatus } from '../shared/types.js';
 import { validateNativeId } from './adapters.js';
 import { OwnedProcess } from './owned-process.ts';
+import { sameDirectory } from './paths.ts';
 
 export interface CodexNativeSession {
   nativeSessionId: string;
@@ -574,7 +575,7 @@ export class CodexBridge {
     const result = await this.rpc<{ thread?: Thread }>('thread/read', { threadId: id, includeTurns: false });
     const thread = result.thread;
     if (thread?.id !== id) throw new Error('Codex 返回了不匹配的原生会话');
-    if (cwd && thread.cwd && resolve(thread.cwd) !== resolve(cwd)) throw new Error('Codex 会话工作目录与联系人不一致');
+    if (cwd && thread.cwd && !await sameDirectory(thread.cwd, cwd)) throw new Error('Codex 会话工作目录与联系人不一致');
     await this.observe(id);
     return { nativeSessionId: id, remoteUrl: this.endpoint };
   }
@@ -590,7 +591,7 @@ export class CodexBridge {
       if (response.error) throw this.rpcError(response, 'Codex Fork 失败');
       const child = (response.result as { thread?: Thread } | undefined)?.thread;
       if (!child?.id || !UUID.test(child.id) || child.id === id || child.forkedFromId !== id) throw new Error('Codex 未创建独立 Fork 会话');
-      if (targetCwd && child.cwd && resolve(child.cwd) !== targetCwd) throw new Error('Codex Fork 未使用请求的工作目录');
+      if (targetCwd && child.cwd && !await sameDirectory(child.cwd, targetCwd)) throw new Error('Codex Fork 未使用请求的工作目录');
       this.retainObserver(child.id, connection);
       if (child.status) this.emitStatus(child.id, this.mapStatus(child.status, 'Codex Fork 会话已连接'));
       return { nativeSessionId: child.id, remoteUrl: this.endpoint };

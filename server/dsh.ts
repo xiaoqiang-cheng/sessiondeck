@@ -10,6 +10,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { findExecutable, validateNativeId } from './adapters.js';
 import type { SessionStatus } from '../shared/types.js';
 import { OwnedProcess } from './owned-process.ts';
+import { sameDirectory } from './paths.ts';
+import { DeliveryNotAcceptedError } from './delivery.ts';
 
 export interface DshBridgeOptions {
   port?: number;
@@ -89,6 +91,8 @@ export class DshBridge {
   private revisions = new Map<string, number>();
   private completed = new Map<string, string>();
   private failed = new Map<string, string>();
+  private statusListeners = new Set<() => void>();
+  onStatusChange(listener: () => void) { this.statusListeners.add(listener); return () => { this.statusListeners.delete(listener); }; }
   private options: DshBridgeOptions;
   constructor(options: DshBridgeOptions = {}) {
     const port = options.port ?? Number(process.env.SESSIONDECK_DSH_PORT ?? 4318);
@@ -281,6 +285,11 @@ export class DshBridge {
             this.observeRunning(frame.sessionId, frame.running);
           }
           this.pending.set(frame.sessionId, requests);
+          if (['approval/requested', 'approval/resolved', 'question/requested', 'question/resolved', 'host/agent-error', 'host/session-status'].includes(frame.type)
+            || (frame.type === 'session/event' && ['turn/start', 'turn/end'].includes(frame.event?.type))) {
+            this.revisions.set(frame.sessionId, (this.revisions.get(frame.sessionId) ?? 0) + 1);
+            for (const listener of this.statusListeners) listener();
+          }
         } catch { /* unsupported stream frame never fabricates status */ }
       });
       const reconnect = () => {
@@ -324,7 +333,14 @@ export class DshBridge {
       if (generation !== this.bootGeneration || !this.ready) throw new Error('DeepSeek Harness 请求所属服务已停止');
       if (result.type !== 'server-response') throw new Error('DeepSeek Harness 返回了无效的响应类型');
       if (result.rpcId !== rpcId) throw new Error('DeepSeek Harness 返回了不匹配的请求 ID');
-      if (result.result?.ok !== true) throw new Error(`DeepSeek Harness：${result.result?.error?.message ?? result.result?.error?.code ?? '无效的 API 响应'}`);
+      if (result.result?.ok === false) {
+        const message = `DeepSeek Harness：${result.result.error?.message ?? result.result.error?.code ?? '原生接口拒绝了请求'}`;
+        // Generic native errors may occur after queue acceptance. Only a
+        // documented pre-dispatch missing-session rejection permits retry.
+        if (method === 'session.prompt' && result.result.error?.code === 'session-not-found') throw new DeliveryNotAcceptedError(message);
+        throw new Error(message);
+      }
+      if (result.result?.ok !== true) throw new Error('DeepSeek Harness 返回了无效的 API 响应');
       return result.result.value as T;
     } finally { this.requests.delete(abort); }
   }
@@ -346,7 +362,7 @@ export class DshBridge {
     if (cwd) {
       const { items } = await this.rpc<{ items: DshSummary[] }>('session.list', {});
       const source = items.find(item => item.sessionId === id);
-      if (!source?.cwd || resolve(source.cwd) !== resolve(cwd)) throw new Error('DeepSeek Harness 原生 Fork 保留原工作目录，暂不支持修改目录');
+      if (!source?.cwd || !await sameDirectory(source.cwd, cwd)) throw new Error('DeepSeek Harness 原生 Fork 保留原工作目录，暂不支持修改目录');
     }
     const result = await this.rpc<{ sessionId: string }>('session.fork', { sessionId: id });
     if (result.sessionId === id) throw new Error('DeepSeek Harness 未创建独立分叉会话');
@@ -426,33 +442,63 @@ export class DshBridge {
   }
 
   async getStatus(id: string): Promise<DshStatus> {
-    validateNativeId('dsh', id);
-    if (!this.ready) return { status: 'unknown', detail: '原生 Web 服务尚未启动' };
+    return (await this.getStatuses([id])).get(id)!;
+  }
+
+  /** One snapshot per polling round, regardless of the number of contacts. */
+  async getStatuses(ids: string[]): Promise<Map<string, DshStatus>> {
+    const unique = [...new Set(ids)];
+    for (const id of unique) validateNativeId('dsh', id);
+    const unknown = (detail: string) => new Map(unique.map(id => [id, { status: 'unknown', detail } as DshStatus]));
+    if (!unique.length) return new Map();
+    if (!this.ready) return unknown('原生 Web 服务尚未启动');
     try {
       const generation = this.bootGeneration;
-      const revision = this.revisions.get(id) ?? 0;
+      const revisions = new Map(unique.map(id => [id, this.revisions.get(id) ?? 0]));
       const result = await this.rpc<{ items: DshSummary[] }>('session.list', {});
-      const item = Array.isArray(result.items) ? result.items.find(row => row?.sessionId === id) : undefined;
-      if (!item) return { status: 'unknown', detail: '原生服务未返回该会话' };
-      if (typeof item.running !== 'boolean') return { status: 'unknown', detail: '原生服务未返回可识别的运行状态' };
-      // Live events received while the HTTP snapshot was in flight are newer.
-      if (revision === (this.revisions.get(id) ?? 0)) this.observeRunning(id, item.running);
-      const nativeRunning = this.observedRunning.get(id) ?? item.running;
-      // A durable turn error may be superseded while the socket is offline.
-      // Host errors have no log position; only an identified newer turn can
-      // clear those, never a pre-existing history tail.
-      if ((!nativeRunning && !this.failed.get(id)?.startsWith('dsh:error:')) || (nativeRunning && !this.muxSynchronized && this.failed.has(id))) await this.recoverHistory(id, nativeRunning);
-      if (generation !== this.bootGeneration || !this.ready) return { status: 'unknown', detail: '原生服务已停止' };
-      const running = this.observedRunning.get(id) ?? item.running;
-      const pending = this.pending.get(id);
-      const approval = pending && [...pending].find(([, status]) => status === 'waiting_approval');
-      const question = pending && [...pending].find(([, status]) => status === 'waiting_input');
-      if (approval) return { status: 'waiting_approval', detail: 'DeepSeek Harness 正在等待审批', attentionKey: `dsh:${id}:${approval[0]}` };
-      if (question) return { status: 'waiting_input', detail: 'DeepSeek Harness 正在等待回答', attentionKey: `dsh:${id}:${question[0]}` };
-      if (this.failed.has(id)) return { status: 'error', detail: 'DeepSeek Harness 报告执行错误，请进入原生会话查看', attentionKey: this.failed.get(id) };
-      if (running && this.options.manageProcess !== false && (!this.streamReady || !this.muxSynchronized)) return { status: 'unknown', detail: '原生服务正在运行；等待事件流确认执行或审批状态' };
-      if (!running && this.completed.has(id)) return { status: 'waiting_input', detail: 'DeepSeek Harness 本轮已结束，可以继续或验收', attentionKey: this.completed.get(id) };
-      return { status: running ? 'running' : 'idle', detail: running ? 'DeepSeek Harness 报告运行中' : 'DeepSeek Harness 报告空闲' };
-    } catch { return { status: 'unknown', detail: '无法连接 DeepSeek Harness 原生服务' }; }
+      const items = new Map((Array.isArray(result.items) ? result.items : []).filter(row => row?.sessionId).map(row => [row.sessionId, row]));
+      const statuses = new Map<string, DshStatus>();
+      const pending = [...unique];
+      await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+        while (pending.length) {
+          const id = pending.shift()!;
+          statuses.set(id, await this.statusFromSnapshot(id, items.get(id), revisions.get(id)!, generation));
+        }
+      }));
+      if (generation !== this.bootGeneration || !this.ready) return unknown('原生服务已停止');
+      for (const id of unique) {
+        const item = items.get(id);
+        if (typeof item?.running === 'boolean') statuses.set(id, this.currentStatus(id, item.running));
+      }
+      return statuses;
+    } catch { return unknown('无法连接 DeepSeek Harness 原生服务'); }
+  }
+
+  private async statusFromSnapshot(id: string, item: DshSummary | undefined, revision: number, generation: number): Promise<DshStatus> {
+    if (generation !== this.bootGeneration || !this.ready) return { status: 'unknown', detail: '原生服务已停止' };
+    if (!item) return { status: 'unknown', detail: '原生服务未返回该会话' };
+    if (typeof item.running !== 'boolean') return { status: 'unknown', detail: '原生服务未返回可识别的运行状态' };
+    // Live events received while the HTTP snapshot was in flight are newer.
+    if (revision === (this.revisions.get(id) ?? 0)) this.observeRunning(id, item.running);
+    const nativeRunning = this.observedRunning.get(id) ?? item.running;
+    // A durable turn error may be superseded while the socket is offline.
+    // Host errors have no log position; only an identified newer turn can
+    // clear those, never a pre-existing history tail.
+    if ((!nativeRunning && !this.failed.get(id)?.startsWith('dsh:error:')) || (nativeRunning && !this.muxSynchronized && this.failed.has(id))) await this.recoverHistory(id, nativeRunning);
+    if (generation !== this.bootGeneration || !this.ready) return { status: 'unknown', detail: '原生服务已停止' };
+    return this.currentStatus(id, item.running);
+  }
+
+  private currentStatus(id: string, snapshotRunning: boolean): DshStatus {
+    const running = this.observedRunning.get(id) ?? snapshotRunning;
+    const pending = this.pending.get(id);
+    const approval = pending && [...pending].find(([, status]) => status === 'waiting_approval');
+    const question = pending && [...pending].find(([, status]) => status === 'waiting_input');
+    if (approval) return { status: 'waiting_approval', detail: 'DeepSeek Harness 正在等待审批', attentionKey: `dsh:${id}:${approval[0]}` };
+    if (question) return { status: 'waiting_input', detail: 'DeepSeek Harness 正在等待回答', attentionKey: `dsh:${id}:${question[0]}` };
+    if (this.failed.has(id)) return { status: 'error', detail: 'DeepSeek Harness 报告执行错误，请进入原生会话查看', attentionKey: this.failed.get(id) };
+    if (running && this.options.manageProcess !== false && (!this.streamReady || !this.muxSynchronized)) return { status: 'unknown', detail: '原生服务正在运行；等待事件流确认执行或审批状态' };
+    if (!running && this.completed.has(id)) return { status: 'waiting_input', detail: 'DeepSeek Harness 本轮已结束，可以继续或验收', attentionKey: this.completed.get(id) };
+    return { status: running ? 'running' : 'idle', detail: running ? 'DeepSeek Harness 报告运行中' : 'DeepSeek Harness 报告空闲' };
   }
 }

@@ -118,8 +118,8 @@ test('duplicate recipients create one pending delivery per member with the share
     assert.equal(delivery.messageId, saved.id);
     assert.equal(delivery.status, 'pending');
     assert.equal(delivery.sentAt, null);
-    assert.ok(delivery.text.includes(group.goal));
-    assert.ok(delivery.text.includes(message.text));
+    assert.ok(store.delivery(delivery.id)!.text.includes(group.goal));
+    assert.ok(store.delivery(delivery.id)!.text.includes(message.text));
   }
 });
 
@@ -182,6 +182,6 @@ test('group handoffs preserve a local result source and reject foreign or missin
   assert.equal(detail.messages[1].sourceMessageId, result.id);
   assert.equal(detail.deliveries[0].messageId, handoff.id);
   assert.equal(detail.deliveries[0].sessionId, reviewer.id);
-  assert.ok(detail.deliveries[0].text.includes(member.title));
-  assert.ok(detail.deliveries[0].text.includes('根据这份结果继续验证。'));
+  assert.ok(store.delivery(detail.deliveries[0].id)!.text.includes(member.title));
+  assert.ok(store.delivery(detail.deliveries[0].id)!.text.includes('根据这份结果继续验证。'));
 });

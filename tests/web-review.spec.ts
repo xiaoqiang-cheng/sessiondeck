@@ -91,12 +91,21 @@ test('a thousand-message group opens recent history, reveals older sources, and 
   const messages: GroupMessage[] = Array.from({ length: 1000 }, (_, index) => ({
     id: `history-${index}`, groupId: group.id, kind: 'task', text: `历史任务 ${index}：核对实现、记录结果并继续协作。`,
     senderId: null, senderName: '你', recipientIds: [members[index % members.length].id],
-    sourceMessageId: index === 999 ? 'history-3' : null, createdAt: group.createdAt,
+    sourceMessageId: index === 999 ? 'history-3' : null, createdAt: group.createdAt, sequence: index + 1, revision: Date.parse(group.updatedAt),
   }));
   const deliveries: Delivery[] = messages.map(message => ({ id: `delivery-${message.id}`, messageId: message.id, sessionId: message.recipientIds[0], text: message.text, status: 'staged', createdAt: group.createdAt, sentAt: group.createdAt }));
   await page.route('**/api/state', route => route.fulfill({ json: state }));
   await page.route('**/api/events', route => route.fulfill({ contentType: 'text/event-stream', body: `retry: 60000\nevent: state\ndata: ${JSON.stringify(state)}\n\n` }));
-  await page.route(`**/api/groups/${group.id}`, route => route.fulfill({ json: { group, messages, deliveries } }));
+  const requests: string[] = [];
+  await page.route(url => url.pathname === `/api/groups/${group.id}`, route => {
+    requests.push(route.request().url());
+    const url = new URL(route.request().url());
+    const before = Number(url.searchParams.get('before') ?? 1001);
+    const matching = url.searchParams.has('since') ? [] : messages.filter(message => message.sequence! < before);
+    const page = matching.slice(-200);
+    return route.fulfill({ json: { group, messages: page, deliveries: deliveries.filter(delivery => page.some(message => message.id === delivery.messageId)), page: { total: 1000, before: matching.length > 200 ? page[0].sequence : null }, revision: group.updatedAt } });
+  });
+  await page.route(`**/api/groups/${group.id}/messages/history-3`, route => route.fulfill({ json: messages[3] }));
   await page.goto(`/#/groups/${group.id}`);
   await expect(page.locator('.group-message')).toHaveCount(200);
   await expect(page.locator('.session-card')).toHaveCount(150);
@@ -112,12 +121,18 @@ test('a thousand-message group opens recent history, reveals older sources, and 
   await expect(composer).toHaveValue('展开旧消息时保留这段草稿');
 
   await page.locator('#group-message-history-999').getByRole('button', { name: /查看原消息/ }).click();
-  await expect(page.locator('#group-message-history-3')).toBeFocused();
-  await expect(page.locator('.history-range')).toContainText('显示第 4–1000 条，共 1000 条');
-  await page.getByRole('button', { name: '显示更早 3 条', exact: true }).click();
+  const preview = page.getByRole('dialog', { name: '来源消息' });
+  await expect(preview).toContainText('历史任务 3：');
+  await expect(page.locator('.group-message')).toHaveCount(400);
+  await preview.getByRole('button', { name: '关闭', exact: true }).click();
+  for (const count of [600, 800, 1000]) {
+    await page.getByRole('button', { name: '显示更早 200 条', exact: true }).click();
+    await expect(page.locator('.group-message')).toHaveCount(count);
+  }
   await expect(page.locator('.group-message')).toHaveCount(1000);
   await expect(page.locator('#group-message-history-0')).toContainText('历史任务 0');
   await expect(composer).toHaveValue('展开旧消息时保留这段草稿');
+  expect(requests.some(url => url.includes('before='))).toBe(true);
   await page.reload();
   await expect(page.locator('.group-message')).toHaveCount(200);
   await expect(composer).toHaveValue('展开旧消息时保留这段草稿');

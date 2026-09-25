@@ -89,7 +89,7 @@ try {
       while (true) {
         const chunk = await reader.read();
         if (chunk.done) break;
-        events += new TextDecoder().decode(chunk.value).split('event: state').length - 1;
+        events += [...new TextDecoder().decode(chunk.value).matchAll(/event: (?:state|patch)/g)].length;
       }
     } catch (error) { if (!abortStreams.signal.aborted) throw error; }
     finally { reader.releaseLock(); }

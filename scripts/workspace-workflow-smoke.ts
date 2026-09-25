@@ -344,8 +344,8 @@ trust_level = "trusted"
   assert.equal(handoff.sourceMessageId, result.id);
   const detail = await api<GroupDetail>(`/api/groups/${group.id}`);
   const pending = detail.deliveries.find(delivery => delivery.messageId === handoff.id); assert.ok(pending);
-  assert.ok(pending.text.includes(contacts.codex.title));
   const delivered = await api<Delivery>(`/api/deliveries/${pending.id}/send`, 'POST', {}); assert.equal(delivered.status, 'sent');
+  assert.ok(delivered.text.includes(contacts.codex.title));
   await api(`/api/deliveries/${pending.id}/send`, 'POST', {}, 400);
   await waitFor(async () => (await card(contacts.dsh.id)).status === 'waiting_input', 'dsh did not report completion of the handed-off group task');
   assert.ok((await card(contacts.dsh.id)).lastActivity > contacts.dsh.lastActivity, 'Native Web activity must refresh card recency without PTY output');

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { DshBridge } from './dsh.ts';
+import { DeliveryNotAcceptedError } from './delivery.ts';
 
 async function freePort() {
   const probe = createServer();
@@ -37,7 +38,7 @@ const fs = require('node:fs');
 const { WebSocketServer } = require(${JSON.stringify(wsModule)});
 const args = process.argv.slice(2), id = ${JSON.stringify(id)};
 ${options.stubborn ? "process.on('SIGTERM', () => {});" : ''}
-let running = false, history = [], holdReplay = false, muxConnections = 0;
+let running = false, history = [], holdReplay = false, muxConnections = 0, holdList = false, releaseList = null;
 const pending = new Map(), paused = new Set();
 const server = http.createServer(async (request, response) => {
   if (${options.probeDelayMs ?? 0} && ['/sessiondeck/instance','/api/session.list'].includes(request.url)) await new Promise(resolve => setTimeout(resolve, ${options.probeDelayMs ?? 0}));
@@ -49,7 +50,7 @@ const server = http.createServer(async (request, response) => {
   }
   if (request.url === '/sessiondeck/instance') { response.end(${options.wrongIdentity ? "'another-process'" : 'process.env.SESSIONDECK_DSH_LAUNCH_TOKEN'}); return; }
   if (request.method === 'GET') {
-    response.end(request.url === '/fixture' ? JSON.stringify({muxConnections}) : 'native fixture'); return;
+    response.end(request.url === '/fixture' ? JSON.stringify({muxConnections, listPending: !!releaseList}) : 'native fixture'); return;
   }
   let body = ''; for await (const chunk of request) body += chunk;
   const input = JSON.parse(body);
@@ -59,6 +60,8 @@ const server = http.createServer(async (request, response) => {
     if (Object.hasOwn(input, 'running')) running = input.running;
     if (Object.hasOwn(input, 'history')) history = input.history;
     if (Object.hasOwn(input, 'holdReplay')) holdReplay = input.holdReplay;
+    if (Object.hasOwn(input, 'holdList')) holdList = input.holdList;
+    if (input.releaseList) { holdList = false; releaseList?.(); releaseList = null; }
     if (input.frame) {
       const frame = input.frame, p = frame.payload;
       if (p.type === 'approval/requested') pending.set('approval:' + p.approvalId, frame);
@@ -78,6 +81,7 @@ const server = http.createServer(async (request, response) => {
   }
   let value = {};
   if (input.method === 'session.list') value = { items: [{ sessionId: id, running }] };
+  if (input.method === 'session.list' && holdList) await new Promise(resolve => { releaseList = resolve; });
   if (input.method === 'session.history') value = { events: history.map(event => ({event})), hasMore: false };
   response.setHeader('content-type', 'application/json');
   response.end(JSON.stringify({ type: 'server-response', rpcId: input.rpcId, result: { ok: true, value } }));
@@ -345,4 +349,49 @@ test('slow successful readiness probes share one deadline and cannot create a na
   assert.equal((await readdir(directory)).filter(name => name.startsWith('dsh-launch-')).length, 0);
   assert.equal((await readFile(join(directory, 'native-mutations'), 'utf8').catch(() => '')), '');
   await assert.rejects(fetch(bridge.baseUrl, { signal: AbortSignal.timeout(100) }), /fetch failed/);
+});
+
+test('forty DSH contacts share one native listing per round and do not cache stale snapshots', async t => {
+  const ids = Array.from({ length: 40 }, () => `session-${randomUUID()}`);
+  let listings = 0, running = true, errorCode = '';
+  const server = createHttpServer(async (request, response) => {
+    let body = ''; for await (const chunk of request) body += chunk;
+    const input = JSON.parse(body);
+    if (input.method === 'session.list') listings++;
+    response.end(JSON.stringify({ type: 'server-response', rpcId: input.rpcId, result: errorCode ? { ok: false, error: { code: errorCode } } : { ok: true, value: input.method === 'session.list' ? { items: ids.map(sessionId => ({ sessionId, running })) } : { events: [] } } }));
+  });
+  await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const bridge = new DshBridge({ port: address.port, manageProcess: false });
+  t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise<void>(accept => server.close(() => accept())); });
+  await bridge.start();
+  const first = await bridge.getStatuses(ids);
+  assert.equal(listings, 1); assert.equal(first.size, 40);
+  assert.ok([...first.values()].every(status => status.status === 'running'));
+  running = false;
+  const second = await bridge.getStatuses(ids);
+  assert.equal(listings, 2);
+  assert.ok([...second.values()].every(status => status.status === 'idle'));
+  errorCode = 'internal-error';
+  await assert.rejects(bridge.prompt(ids[0], 'task'), error => !(error instanceof DeliveryNotAcceptedError));
+  errorCode = 'session-not-found';
+  await assert.rejects(bridge.prompt(ids[0], 'task'), DeliveryNotAcceptedError);
+});
+
+test('live DSH boundaries received during a batched listing win over that older snapshot', async t => {
+  const { bridge, id, configure, send, waitStatus } = await fixture(t);
+  let changes = 0;
+  bridge.onStatusChange(() => { changes++; });
+  await bridge.start();
+  await until(async () => Number((await (await fetch(`${bridge.baseUrl}/fixture`)).json()).muxConnections) === 1, 'mux did not connect');
+  await send({ type: 'session/event', event: { type: 'turn/start', seq: 1 } }, { running: true });
+  await waitStatus('running');
+  await configure({ holdList: true });
+  const pending = bridge.getStatuses([id]);
+  await until(async () => (await (await fetch(`${bridge.baseUrl}/fixture`)).json()).listPending, 'list not held');
+  const before = changes;
+  await send({ type: 'session/event', event: { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } } }, { running: false });
+  await until(async () => changes > before, 'status event did not request refresh');
+  await configure({ releaseList: true });
+  assert.equal((await pending).get(id)?.status, 'waiting_input');
 });

@@ -5,6 +5,10 @@
   "type": "module",
   "description": "Local-first web home for Claude Code, Codex and DeepSeek Harness sessions",
   "scripts": {
+    "postinstall": "node scripts/prepare-pty.mjs",
+    "preflight": "node scripts/prepare-pty.mjs && tsx scripts/check-pty.ts",
+    "prestart": "npm run preflight",
+    "predev": "npm run preflight",
     "dev": "tsx watch server/index.ts --dev",
     "start": "tsx server/index.ts",
     "build": "tsc --noEmit && vite build",

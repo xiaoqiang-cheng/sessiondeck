@@ -61,7 +61,7 @@ test('a real service restart preserves contacts and queued handoffs, invalidates
   const oldState = await request<AppState>('/api/state');
   const nextState = await request<AppState>('/api/state');
   assert.equal(nextState.instanceId, oldState.instanceId);
-  assert.ok(nextState.revision! > oldState.revision!);
+  assert.equal(nextState.revision, oldState.revision, 'Snapshot reads do not invent new state versions');
   await stop(live.child);
   live = await start();
   assert.notEqual(live.token, oldToken);

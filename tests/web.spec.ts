@@ -167,7 +167,6 @@ test('group history failures have their own retry without losing the workspace',
 test('mobile navigation and the dialog stay usable at narrow widths', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   await page.goto('/');
-  await page.getByRole('button', { name: '打开导航', exact: true }).click();
   await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: '正在运行', exact: true }).click();
   await expect(page.getByRole('heading', { name: '正在运行', exact: true })).toBeVisible();
   await expect(page.getByText('目前没有正在执行的任务')).toBeVisible();
@@ -176,9 +175,8 @@ test('mobile navigation and the dialog stay usable at narrow widths', async ({ p
   await expect(dialog.getByLabel('联系人名称')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
-  await page.getByRole('button', { name: '打开导航', exact: true }).click();
-  await page.keyboard.press('Escape');
-  await expect(page.locator('.sidebar')).not.toHaveClass(/mobile-open/);
+  await expect(page.getByRole('navigation', { name: '协作群组', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
 });
 
 test('session bookmarks reload the same private context and browser history restores routes without starting a process', async ({ page }) => {
@@ -295,6 +293,7 @@ test('contact sorting and filters persist across reload with separate filters fo
   });
   await page.goto('/');
   await page.getByLabel('搜索联系人', { exact: true }).fill('排序');
+  await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await page.locator('.backend-tabs').getByRole('button', { name: 'Codex', exact: true }).click();
   await page.getByLabel('按状态筛选').selectOption('idle');
   await page.getByLabel('联系人排序').selectOption('name');
@@ -302,10 +301,12 @@ test('contact sorting and filters persist across reload with separate filters fo
   await page.getByLabel('联系人排序').selectOption('created');
   await expect(page.locator('.session-card h3')).toHaveText(['Z 排序置顶', 'B 排序联系人', 'A 排序联系人']);
   await page.reload();
+  await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await expect(page.getByLabel('联系人排序')).toHaveValue('created');
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('排序');
   await expect(page.getByLabel('按状态筛选')).toHaveValue('idle');
   await expect(page.locator('.backend-tabs').getByRole('button', { name: 'Codex', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.keyboard.press('Escape');
   await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: '需要你处理', exact: true }).click();
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('');
   await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /会话联系人/ }).click();
@@ -316,6 +317,7 @@ test('contact sorting and filters persist across reload with separate filters fo
   await expect(page.locator('.session-card')).toHaveCount(4);
   await page.reload();
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('');
+  await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await expect(page.getByLabel('按状态筛选')).toHaveValue('all');
 });
 
@@ -325,7 +327,7 @@ test('keyboard help is discoverable and workspace shortcuts do not steal typing 
   const help = page.getByRole('dialog', { name: '使用说明与快捷键' });
   await expect(help.getByText('如何理解状态', { exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
-  await page.getByRole('heading', { name: '会话联系人', exact: true }).click();
+  await page.locator('main').click({ position: { x: 5, y: 400 } });
   await page.keyboard.press('?');
   await expect(help).toBeVisible();
   await help.getByRole('button', { name: '知道了', exact: true }).click();
@@ -351,7 +353,7 @@ test('first contact guidance offers import and backend setup when no tools are i
     state.backends = state.backends.map(backend => ({ ...backend, installed: false, version: null }));
   });
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: '把你的第一段会话安放在这里' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '还没有联系人' })).toBeVisible();
   await expect(page.getByText(/尚未检测到本机 Agent/)).toBeVisible();
   await page.getByRole('button', { name: '导入已有会话', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '导入已有会话' })).toBeVisible();
@@ -378,7 +380,6 @@ test('many cards and long names, paths and group titles remain within desktop an
     expect(await page.locator('.session-card h3').first().evaluate(element => element.clientHeight < 60)).toBeTruthy();
   }
   await page.screenshot({ path: 'artifacts/long-contacts-mobile.png', animations: 'disabled' });
-  await page.getByRole('button', { name: '打开导航', exact: true }).click();
   await page.getByRole('navigation', { name: '协作群组', exact: true }).getByRole('button', { name: new RegExp(longGroup) }).click();
   await expect(page.getByLabel('群组消息')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -396,7 +397,7 @@ test('unrelated session updates do not reload group history, while group revisio
   });
   const group = await createTestGroup(page, '动态刷新回归');
   let historyRequests = 0;
-  await page.route(`**/api/groups/${group.id}`, async route => { historyRequests++; await route.continue(); });
+  await page.route(url => url.pathname === `/api/groups/${group.id}`, async route => { historyRequests++; await route.continue(); });
   await page.goto('/');
   await openGroup(page, '动态刷新回归');
   const initial = historyRequests;
@@ -491,9 +492,11 @@ test('execution filters distinguish an attached idle process from an active task
   await page.goto('/#/running');
   await expect(page.locator('.session-card h3')).toHaveText(['真正执行任务']);
   await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /会话联系人/ }).click();
+  await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await page.getByLabel('按状态筛选').selectOption('unread');
   await expect(page.locator('.session-card h3')).toHaveText(['保留未读提醒']);
   await page.reload();
+  await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await expect(page.getByLabel('按状态筛选')).toHaveValue('unread');
   await expect(page.locator('.session-card h3')).toHaveText(['保留未读提醒']);
 });

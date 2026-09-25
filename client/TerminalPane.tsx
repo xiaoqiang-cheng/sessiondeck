@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ArrowDownToLine, Copy, Check, Maximize2, TerminalSquare, WifiOff, X } from 'lucide-react';
+import { ArrowDownToLine, Copy, Check, Maximize2, Minimize2, WifiOff, X } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import { getToken } from './api';
 
@@ -15,6 +15,7 @@ export default function TerminalPane({ sessionId, running, onSelection }: {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   selectionRef.current = onSelection;
 
@@ -28,18 +29,23 @@ export default function TerminalPane({ sessionId, running, onSelection }: {
     setConnected(false); setError(''); setCopied(false);
     selectionRef.current('');
     const terminal = new Terminal({
-      cursorBlink: true, fontSize: 13, lineHeight: 1.45, scrollback: 8000,
+      cursorBlink: true, fontSize: 13, lineHeight: 1.25, scrollback: 8000,
       disableStdin: true, screenReaderMode: true,
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
       theme: {
-        background: '#182326', foreground: '#e3ece9', cursor: '#b0e0bd',
-        selectionBackground: '#496964', black: '#182326', red: '#ff9595', green: '#a1d3ac',
-        yellow: '#efcf8c', blue: '#91bcef', magenta: '#c3ace8', cyan: '#8bd7d0', white: '#e3ece9',
+        background: '#16181d', foreground: '#e6e7ea', cursor: '#e6e7ea',
+        selectionBackground: '#3b4250', black: '#16181d', red: '#f28b82', green: '#9fd89f',
+        yellow: '#f2d479', blue: '#8ab4f8', magenta: '#c58af9', cyan: '#78d9ec', white: '#e6e7ea',
       },
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(containerRef.current);
+    // Esc belongs to the native CLI, so fullscreen uses a chord xterm never forwards.
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey && (event.metaKey || event.ctrlKey)) { setFullscreen((value) => !value); return false; }
+      return true;
+    });
     terminal.textarea?.setAttribute('aria-label', '原生会话终端输入');
     terminalRef.current = terminal;
     fitRef.current = fit;
@@ -106,21 +112,22 @@ export default function TerminalPane({ sessionId, running, onSelection }: {
       resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
     };
   }, [sessionId, running]);
+  useEffect(() => { requestAnimationFrame(() => terminalRef.current?.focus()); }, [fullscreen]);
 
-  return <div className="terminal-pane">
-    <div className="terminal-toolbar"><span><TerminalSquare size={14} /> 原生会话终端</span><div>
-      <span title={connected ? '浏览器已连接终端通道；任务是否执行请查看上方会话状态' : '正在连接终端通道'} className={`terminal-connection ${connected ? 'connected' : ''}`}><i />{connected ? '已连接' : '连接中'}</span>
+  const toggleLabel = fullscreen ? '退出全屏' : '全屏';
+  return <div className={`terminal-pane ${fullscreen ? 'fullscreen' : ''}`}>
+    <div className="terminal-toolbar"><span title={connected ? '浏览器已连接终端通道；任务是否执行请查看会话状态' : '正在连接终端通道'} className={`terminal-connection ${connected ? 'connected' : ''}`}><i />{connected ? '已连接' : '连接中'}</span><div>
       <button title="复制选中的终端内容" aria-label="复制选中的终端内容" onClick={async () => {
         const selected = terminalRef.current?.getSelection();
         if (!selected) { setError('先在终端中选中要复制的内容'); return; }
         try { await navigator.clipboard.writeText(selected); setCopied(true); setError(''); clearTimeout(copiedTimer.current); copiedTimer.current = setTimeout(() => setCopied(false), 1800); }
         catch { setError('浏览器无法访问剪贴板，请使用系统复制快捷键'); }
-      }}>{copied ? <Check size={15} /> : <Copy size={15} />}</button>
-      <button title="回到终端底部" aria-label="回到终端底部" onClick={() => { terminalRef.current?.scrollToBottom(); terminalRef.current?.focus(); }}><ArrowDownToLine size={15} /></button>
-      <button title="适应窗口" aria-label="适应窗口" onClick={() => { fitRef.current?.fit(); terminalRef.current?.focus(); }}><Maximize2 size={15} /></button>
+      }}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>
+      <button title="回到终端底部" aria-label="回到终端底部" onClick={() => { terminalRef.current?.scrollToBottom(); terminalRef.current?.focus(); }}><ArrowDownToLine size={14} /></button>
+      <button title={`${toggleLabel}（Ctrl / ⌘ + Shift + Enter）`} aria-label={toggleLabel} aria-pressed={fullscreen} onClick={() => setFullscreen((value) => !value)}>{fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
     </div></div>
     {error && <div className="terminal-error" role="alert"><WifiOff size={14} /><span>{error}</span><button className="terminal-dismiss" aria-label="关闭终端提示" onClick={() => setError('')}><X size={13} /></button></div>}
     <div ref={containerRef} className="terminal-container" />
-    {!running && <div className="terminal-hint">启动会话后，在这里使用原生 CLI。输入、审批与上下文由后端处理。</div>}
+    {!running && <div className="terminal-hint">启动会话后，在这里使用原生 CLI。</div>}
   </div>;
 }

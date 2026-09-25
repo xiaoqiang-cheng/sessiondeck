@@ -49,7 +49,10 @@ test('late exit of a stopped PTY cannot stop or replace a newly started terminal
     args: ['-e', `const finish=()=>setTimeout(()=>process.exit(0),150);process.on('SIGHUP',finish);process.on('SIGTERM',finish);process.stdout.write('OLD_READY');setInterval(()=>{},1000);`],
   });
   await until(() => terminals.buffer(session.id).includes('OLD_READY'), 'First terminal did not start');
-  terminals.stop(session.id);
+  const stopped = terminals.stop(session.id);
+  assert.equal(terminals.has(session.id), true, 'keep ownership until cleanup finishes');
+  assert.throws(() => terminals.start(session, { file: process.execPath, args: ['-e', 'process.exit(0)'] }), /正在停止/);
+  await stopped;
   terminals.start(session, {
     file: process.execPath,
     args: ['-e', `process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');process.stdout.write('NEW_READY');process.stdin.on('data',d=>process.stdout.write('NEW_RECEIVED:'+d));`],
@@ -74,7 +77,10 @@ test('forced cleanup of a stopped stubborn PTY never targets its immediate repla
     args: ['-e', `process.on('SIGHUP',()=>{});process.on('SIGTERM',()=>{});process.stdout.write('OLD_READY');setInterval(()=>{},1000);`],
   });
   await until(() => terminals.buffer(session.id).includes('OLD_READY'), 'Stubborn terminal did not start');
-  terminals.stop(session.id);
+  const stopped = terminals.stop(session.id);
+  assert.equal(terminals.stop(session.id), stopped, 'concurrent stops join the cleanup');
+  assert.throws(() => terminals.start(session, { file: process.execPath, args: ['-e', 'process.exit(0)'] }), /正在停止/);
+  await stopped;
   terminals.start(session, {
     file: process.execPath,
     args: ['-e', `process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');process.stdout.write('NEW_READY');process.stdin.on('data',data=>process.stdout.write('NEW_RECEIVED:'+data));`],

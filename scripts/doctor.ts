@@ -2,7 +2,7 @@ import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { spawn } from 'node-pty';
+import { checkPty } from '../server/pty-health.ts';
 import { getBackendInfo } from '../server/adapters.ts';
 
 // Read-only checks plus a short-lived local PTY. No agent is started and no model is called.
@@ -28,17 +28,7 @@ try {
 } catch (error) { checks.push({ label: '本地数据目录', state: 'error', detail: `${dataDir}：${error instanceof Error ? error.message : '无法访问'}` }); }
 
 try {
-  await new Promise<void>((accept, reject) => {
-    let output = '';
-    const child = spawn(process.execPath, ['-e', 'process.stdout.write("sessiondeck-pty-ok")'], { name: 'xterm', cols: 80, rows: 24, cwd: process.cwd(), env: process.env as Record<string, string> });
-    const timer = setTimeout(() => { child.kill(); reject(new Error('终端响应超时')); }, 5000);
-    child.onData(data => { output += data; });
-    child.onExit(({ exitCode }) => {
-      clearTimeout(timer);
-      if (exitCode === 0 && output.includes('sessiondeck-pty-ok')) accept();
-      else reject(new Error(`终端检查失败（退出码 ${exitCode}）`));
-    });
-  });
+  await checkPty();
   checks.push({ label: '原生终端', state: 'ok', detail: 'node-pty 可以启动本地进程并读取输出' });
 } catch (error) { checks.push({ label: '原生终端', state: 'error', detail: error instanceof Error ? error.message : String(error) }); }
 

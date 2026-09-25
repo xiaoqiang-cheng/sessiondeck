@@ -9,8 +9,9 @@ usage() {
     '--dev:   start with automatic reload instead of a production build.' \
     '' \
     'Requires Node.js 24+ and npm. Press Ctrl+C to stop.' \
-    'Settings: SESSIONDECK_PORT, SESSIONDECK_DATA_DIR, SESSIONDECK_DEMO.' \
-    'PORT overrides SESSIONDECK_PORT when both are set.'
+    'Settings: SESSIONDECK_HOST, SESSIONDECK_PORT, SESSIONDECK_DATA_DIR,' \
+    'SESSIONDECK_DEMO.' \
+    'HOST and PORT override SESSIONDECK_HOST and SESSIONDECK_PORT when both are set.'
 }
 
 if (( $# > 1 )); then usage >&2; exit 2; fi
@@ -43,6 +44,8 @@ if [[ ! -x node_modules/.bin/tsx || ! -x node_modules/.bin/vite || ! -x node_mod
   printf '%s\n' 'Installing SessionDeck dependencies...'
   npm ci --include=dev
 fi
+
+npm run preflight
 
 if [[ "${1:-}" == --dev ]]; then
   exec ./node_modules/.bin/tsx watch server/index.ts --dev

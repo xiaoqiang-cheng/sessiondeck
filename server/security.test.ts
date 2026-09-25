@@ -14,6 +14,25 @@ test('same-origin requests to explicit loopback hosts pass, including direct loc
   }
 });
 
+test('wildcard binding accepts any host on the configured port', () => {
+  for (const host of ['192.168.1.20:4317', '10.0.0.2:4317', 'sessiondeck.local:4317', '[fd00::20]:4317']) {
+    assert.equal(allowedRequest({ headers: { host, origin: `http://${host}` } }, port, true), true);
+    assert.equal(allowedRequest({ headers: { host } }, port, true), true);
+  }
+  assert.equal(allowedRequest({ headers: { host: '192.168.1.21:9999', origin: 'http://192.168.1.21:9999' } }, port, true), false);
+});
+
+test('wildcard binding retains same-origin checks and rejects malformed hosts', () => {
+  const host = '192.168.1.20:4317';
+  for (const origin of ['http://another.example:4317', 'https://192.168.1.20:4317', 'null']) {
+    assert.equal(allowedRequest({ headers: { host, origin } }, port, true), false);
+  }
+  assert.equal(allowedRequest({ headers: { host, 'sec-fetch-site': 'cross-site' } }, port, true), false);
+  for (const invalidHost of [undefined, 'user@sessiondeck.local:4317', 'bad host:4317', 'sessiondeck.local/path:4317']) {
+    assert.equal(allowedRequest({ headers: { host: invalidHost } }, port, true), false);
+  }
+});
+
 test('DNS rebinding and host suffix tricks are rejected even with a claimed local origin', () => {
   for (const host of [
     undefined, 'attacker.example:4317', '127.0.0.1.attacker.example:4317',

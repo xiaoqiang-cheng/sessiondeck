@@ -265,7 +265,7 @@ test('a failed initial snapshot does not leave a connection error after live sta
   await page.route('**/api/state', route => snapshots++ === 0 ? route.abort('connectionrefused') : route.continue());
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '会话联系人', exact: true })).toBeVisible();
-  await expect(page.locator('.sidebar-footer')).toContainText('本地服务已连接');
+  await expect(page.locator('.connection-indicator')).toContainText('本地服务已连接');
   await expect(page.getByRole('button', { name: '进入 SessionDeck · 开发笔记 的会话', exact: true })).toBeVisible();
   await expect(page.locator('.error-banner')).not.toBeVisible();
   await mkdir('artifacts', { recursive: true });
@@ -357,4 +357,106 @@ test('late snapshots cannot undo live attention, and a restarted service adopts 
   await expect(card).toContainText('服务重启后继续保留提醒');
   await deliver({ ...restarted, revision: 2 });
   expect(await page.evaluate(() => (window as unknown as { testNotifications: unknown[] }).testNotifications.length)).toBe(1);
+});
+
+test('entity patches update cards, ignore duplicates, and resync a missing version', async ({ page }) => {
+  await installStateStream(page);
+  const seed = await readState(page.request);
+  let state: AppState = { ...seed, instanceId: 'delta-server', revision: 10, sessions: [{ ...seed.sessions[0], groupId: null, archived: false }], groups: [], activities: [] };
+  let snapshots = 0;
+  let holdNext = false, heldRequest = false, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/state', async route => {
+    snapshots++; const snapshot = structuredClone(state);
+    if (holdNext) { holdNext = false; heldRequest = true; await held; }
+    return route.fulfill({ json: snapshot });
+  });
+  await page.goto('/');
+  const card = page.locator('.session-card');
+  await expect(card).toHaveCount(1);
+  const initialRequests = snapshots;
+  const updated = { ...state.sessions[0], status: 'waiting_approval' as const, statusDetail: '原生审批等待处理', unread: 1 };
+  const patch: import('../shared/types').StatePatch = { instanceId: state.instanceId!, baseRevision: 10, revision: 11, sessions: [updated] };
+  const deliver = (value: typeof patch) => page.evaluate(data => (window as unknown as { recoverySource: EventSource }).recoverySource.dispatchEvent(new MessageEvent('patch', { data: JSON.stringify(data) })), value);
+  await deliver(patch);
+  await expect(card).toContainText('原生审批等待处理');
+  await deliver({ ...patch, sessions: state.sessions });
+  await expect(card).toContainText('原生审批等待处理');
+  expect(snapshots).toBe(initialRequests);
+  state = { ...state, revision: 14, sessions: [{ ...updated, statusDetail: '补齐丢失版本后的状态' }] };
+  holdNext = true;
+  await deliver({ ...patch, baseRevision: 13, revision: 14 });
+  await expect.poll(() => heldRequest).toBe(true);
+  state = { ...state, revision: 16, sessions: [{ ...updated, statusDetail: '补齐期间再次更新的状态' }] };
+  await deliver({ ...patch, baseRevision: 15, revision: 16 });
+  release();
+  await expect(card).toContainText('补齐期间再次更新的状态');
+  await expect.poll(() => snapshots).toBe(initialRequests + 2);
+});
+
+test('uncertain deliveries require an explicit checked result before retrying', async ({ page }) => {
+  await installStateStream(page);
+  const seed = await readState(page.request);
+  const group = { ...seed.groups[0], id: 'unknown-delivery', title: '待确认投递' };
+  const member = { ...seed.sessions[0], groupId: group.id };
+  const state = { ...seed, groups: [group], sessions: [member] };
+  const detail: GroupDetail = { group, messages: [{ id: 'unknown-message', groupId: group.id, senderId: null, senderName: '你', kind: 'task', text: '发送后响应丢失', recipientIds: [member.id], createdAt: group.createdAt }], deliveries: [{ id: 'uncertain', messageId: 'unknown-message', sessionId: member.id, status: 'unknown', createdAt: group.createdAt, sentAt: null, attempts: [{ id: 'attempt-1', mode: 'staged', startedAt: group.createdAt, outcome: 'unknown' }] }], page: { total: 1, before: null }, revision: group.updatedAt };
+  await page.route('**/api/state', route => route.fulfill({ json: state }));
+  await page.route(url => url.pathname === `/api/groups/${group.id}`, route => route.fulfill({ json: detail }));
+  let resolutions = 0;
+  await page.route('**/api/deliveries/uncertain/resolve', route => {
+    expect(route.request().postDataJSON()).toEqual({ attemptId: 'attempt-1', resolution: 'not_received' });
+    resolutions++;
+    detail.deliveries[0].status = 'pending';
+    group.updatedAt = new Date(Date.parse(group.updatedAt) + 1).toISOString(); detail.revision = group.updatedAt;
+    state.revision = (state.revision ?? 0) + 1;
+    return route.fulfill({ json: detail.deliveries[0] });
+  });
+  await page.goto(`/#/groups/${group.id}`);
+  await expect(page.getByText('结果待确认，请核对原生会话')).toBeVisible();
+  await expect(page.getByRole('button', { name: '填入会话', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '已核对，已收到', exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button', { name: '已核对，未收到', exact: true }).click();
+  await expect(page.getByRole('button', { name: '填入会话', exact: true })).toBeEnabled();
+  expect(resolutions).toBe(1);
+  await expect(page.getByText('结果待确认，请核对原生会话')).toHaveCount(0);
+});
+
+test('an older page racing a delivery delta catches up without gaps or stale pending actions', async ({ page }) => {
+  await installStateStream(page);
+  const seed = await readState(page.request);
+  const baseline = '2026-01-01T00:00:00.000Z', changed = '2026-01-01T00:00:00.001Z';
+  const group = { ...seed.groups[0], id: 'history-race', updatedAt: baseline };
+  const member = { ...seed.sessions[0], groupId: group.id };
+  const state: AppState = { ...seed, instanceId: 'history-race-server', revision: 10, groups: [group], sessions: [member] };
+  const messages = Array.from({ length: 201 }, (_, i) => ({ id: `race-${i}`, groupId: group.id, senderId: null, senderName: '你', kind: 'task' as const, text: `历史消息 ${i}`, recipientIds: [member.id], createdAt: baseline, sequence: i + 1, revision: Date.parse(baseline) }));
+  const delivery = { id: 'race-delivery', messageId: 'race-0', sessionId: member.id, status: 'pending' as const, createdAt: baseline, sentAt: null };
+  await page.route('**/api/state', route => route.fulfill({ json: state }));
+  let release!: () => void, olderRequested = false, deltas = 0;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route(url => url.pathname === `/api/groups/${group.id}`, async route => {
+    const query = new URL(route.request().url()).searchParams;
+    if (query.has('before')) {
+      olderRequested = true; await held;
+      return route.fulfill({ json: { group, messages: [messages[0]], deliveries: [delivery], page: { total: 201, before: null }, revision: baseline } });
+    }
+    if (query.has('since')) {
+      deltas++;
+      return route.fulfill({ json: { group: { ...group, updatedAt: changed }, messages: [{ ...messages[0], revision: Date.parse(changed) }], deliveries: [{ ...delivery, status: 'cancelled' }], page: { total: 201, before: null }, revision: changed } });
+    }
+    return route.fulfill({ json: { group, messages: messages.slice(1), deliveries: [], page: { total: 201, before: 2 }, revision: baseline } });
+  });
+  await page.goto(`/#/groups/${group.id}`);
+  await expect(page.locator('.group-message')).toHaveCount(200);
+  await page.getByRole('button', { name: '显示更早 1 条', exact: true }).click();
+  await expect.poll(() => olderRequested).toBe(true);
+  await page.evaluate(data => (window as unknown as { recoverySource: EventSource }).recoverySource.dispatchEvent(new MessageEvent('patch', { data: JSON.stringify(data) })), { instanceId: state.instanceId, baseRevision: 10, revision: 11, groups: [{ ...group, updatedAt: changed }] });
+  await expect.poll(() => deltas).toBe(1);
+  await expect(page.locator('.group-message')).toHaveCount(200);
+  release();
+  await expect(page.locator('.group-message')).toHaveCount(201);
+  await expect(page.locator('#group-message-race-0')).toContainText('已取消');
+  await expect(page.locator('#group-message-race-0').getByRole('button', { name: '填入会话', exact: true })).toHaveCount(0);
 });
