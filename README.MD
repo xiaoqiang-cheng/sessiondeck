@@ -214,6 +214,20 @@ Claude Code、Codex、dsh 均为目标后端，但不能把“支持 DeepSeek �
 
 本轮运行与验收环境为 Linux。macOS 和 Windows 尚未验收；按 PID 启动时间核对并回收多代进程的增强逻辑目前仅用于 Linux。
 
+一键启动：
+
+```sh
+./start.sh
+```
+
+脚本检查 Node.js 24+ 和 npm，在缺少依赖或依赖清单更新时自动安装，然后构建并启动。浏览器访问 `http://127.0.0.1:4317`，终端按 Ctrl+C 正常关闭。可以从其他目录通过脚本的绝对路径启动；工作目录统一为项目目录。
+
+开发模式使用 `./start.sh --dev`，查看选项使用 `./start.sh --help`。沿用下方环境变量，例如 `SESSIONDECK_PORT=4327 ./start.sh`；设置数据目录时建议使用绝对路径。同一数据目录已有实例运行时，需先关闭该实例。
+
+开发模式若提示 `ENOSPC: System limit for number of file watchers reached`，可使用 `CHOKIDAR_USEPOLLING=1 ./start.sh --dev` 改为轮询文件变化；默认启动不需要文件监听。
+
+手动安装和开发启动：
+
 ```sh
 npm install
 npm run doctor
