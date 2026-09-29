@@ -5,7 +5,7 @@ import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { WebSocket } from 'ws';
@@ -118,16 +118,32 @@ test('local HTTP and real demo PTYs complete the contact, fork and group flow', 
   let member: Session;
   let reviewer: Session;
   let source: Session;
+  await t.test('directory browsing requires local token; pasted file links normalize without creating a session', async () => {
+    const before = (await request<AppState>('/api/state')).sessions.length;
+    const body = { path: pathToFileURL(directory).href };
+    assert.equal((await fetch(`${base}/api/directories/list`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).status, 403);
+    assert.equal((await fetch(`${base}/api/directories/list`, { method: 'POST', headers: {
+      'Content-Type': 'application/json', 'X-SessionDeck-Token': token, Origin: 'https://attacker.example',
+    }, body: JSON.stringify(body) })).status, 403);
+    const listing = await request<{ path: string; entries: unknown[] }>('/api/directories/list', 'POST', body);
+    assert.equal(listing.path, directory);
+    assert.ok(Array.isArray(listing.entries));
+    await request('/api/directories/list', 'POST', { path: 'https://example.com/project' }, 400);
+    await request('/api/directories/list', 'POST', { path: join(directory, 'missing') }, 400);
+    assert.equal((await request<AppState>('/api/state')).sessions.length, before);
+  });
   await t.test('contacts rename, reload, and fork into a group while retaining the source', async () => {
     source = await request<Session>('/api/import', 'POST', {
-      backend: 'codex', nativeSessionId: 'demo-api-source', title: '独立来源', cwd: directory,
+      backend: 'codex', nativeSessionId: 'demo-api-source', title: '独立来源', cwd: pathToFileURL(directory).href,
     }, 201);
+    assert.equal(source.cwd, directory);
     const title = '新的名称 · `literal` $(literal)';
     await request(`/api/sessions/${source.id}`, 'PATCH', { title });
     const reloaded = await request<AppState>('/api/state');
     assert.equal(reloaded.sessions.find(s => s.id === source.id)?.title, title);
     group = await request<Group>('/api/groups', 'POST', { title: '跨后端功能组', goal: '分别实现与审查' }, 201);
-    const fork = await request<Session>(`/api/sessions/${source.id}/fork`, 'POST', { title: '群内分支', groupId: group.id }, 201);
+    const fork = await request<Session>(`/api/sessions/${source.id}/fork`, 'POST', { title: '群内分支', groupId: group.id, cwd: `"${directory}"` }, 201);
+    assert.equal(fork.cwd, directory);
     assert.notEqual(fork.id, source.id);
     assert.notEqual(fork.nativeSessionId, source.nativeSessionId);
     assert.equal(fork.parentId, source.id);

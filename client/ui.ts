@@ -23,6 +23,9 @@ export function useDialog(ref: RefObject<HTMLElement | null>, active: boolean, c
     const focusables = () => [...(ref.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])]
       .filter((element) => !element.closest('[inert]') && element.getClientRects().length > 0);
     const timer = setTimeout(() => {
+      // Initial focus must not steal a user's rapid click or typing, nor jump
+      // back into a form while its nested directory picker is active.
+      if (!ref.current || ref.current.inert || ref.current.contains(document.activeElement)) return;
       const preferred = ref.current?.querySelector<HTMLElement>('input:not(:disabled),textarea:not(:disabled),select:not(:disabled)');
       (preferred ?? focusables()[0] ?? ref.current)?.focus();
     }, 30);

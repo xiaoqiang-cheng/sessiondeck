@@ -55,12 +55,12 @@ test('a failed Fork retains editable fields for retry, and a dismissed menu dial
   await page.getByRole('button', { name: 'Fork 会话', exact: true }).click();
   const fork = page.getByRole('dialog', { name: 'Fork 会话', exact: true });
   await fork.getByLabel('联系人名称').fill('Fork 失败后重试');
-  const cwd = await fork.getByLabel('新的工作目录').inputValue();
+  const cwd = await fork.getByLabel('新的工作目录', { exact: true }).inputValue();
   await page.route('**/api/sessions/*/fork', route => route.fulfill({ status: 503, json: { error: '原生 Fork 暂时失败，请重试' } }));
   await fork.getByRole('button', { name: '创建 Fork', exact: true }).click();
   await expect(fork.getByRole('alert')).toHaveText('原生 Fork 暂时失败，请重试');
   await expect(fork.getByLabel('联系人名称')).toHaveValue('Fork 失败后重试');
-  await expect(fork.getByLabel('新的工作目录')).toHaveValue(cwd);
+  await expect(fork.getByLabel('新的工作目录', { exact: true })).toHaveValue(cwd);
   await page.unroute('**/api/sessions/*/fork');
   await fork.getByRole('button', { name: '创建 Fork', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Fork 失败后重试 的私聊' })).toBeVisible();

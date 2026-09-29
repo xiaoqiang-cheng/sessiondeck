@@ -25,6 +25,9 @@ export interface Session {
   statusSource: StatusSource;
   statusDetail: string;
   lastActivity: string;
+  /** Short excerpt from the latest persisted human input; never terminal output. */
+  lastUserInput?: string | null;
+  lastUserInputAt?: string | null;
   createdAt: string;
   updatedAt: string;
   archived: boolean;
@@ -42,6 +45,20 @@ export interface DiscoveredSession {
   title: string;
   cwd: string;
   lastActivity: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAt?: string;
+}
+
+export interface ConversationTranscript {
+  messages: ConversationMessage[];
+  updatedAt?: string;
+  truncated: boolean;
+  notice?: string;
 }
 
 export interface Group {

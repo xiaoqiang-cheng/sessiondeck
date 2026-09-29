@@ -18,7 +18,9 @@ import { acquireInstanceLock } from './instance-lock.ts';
 import { CodexBridge } from './codex.ts';
 import { sendDelivery } from './delivery.ts';
 import { StatePublisher } from './state.ts';
-import type { Backend, BackendInfo, Session, AppState, SessionStatus } from '../shared/types.ts';
+import { listDirectories, normalizeDirectoryInput } from './directories.ts';
+import { ConversationReader, conversationPreview } from './conversation.ts';
+import type { Backend, BackendInfo, Session, AppState, SessionStatus, ConversationTranscript } from '../shared/types.ts';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const port = Number(process.env.PORT || process.env.SESSIONDECK_PORT || 4317);
@@ -35,6 +37,7 @@ const instanceId = randomUUID();
 const terminals = new Terminals();
 const nativeStatus = new NativeStatusWatcher();
 const dsh = new DshBridge({ dataDir });
+const conversations = new ConversationReader({ dshHistory: id => dsh.readHistory(id) });
 // Codex's app-server is lazy-started on the first Codex contact. This keeps a
 // Claude/dsh-only installation usable when an older Codex CLI lacks the bridge
 // flags, while preserving exact native IDs whenever the installed CLI supports it.
@@ -95,12 +98,22 @@ function backend(value: unknown): Backend {
   return value as Backend;
 }
 function directory(value: unknown) {
-  const path = resolve(text(value, '工作目录', 4096));
+  const path = normalizeDirectoryInput(value);
   try { if (!statSync(path).isDirectory()) fail('工作目录不是目录'); }
   catch { fail('工作目录不存在或无法访问'); }
   return path;
 }
 function session(id: string) { return store.session(id) || fail('会话不存在', 404); }
+function updatePreview(item: Session, transcript: ConversationTranscript) {
+  if (closing || demo || item.forkPending || !item.nativeSessionId) return;
+  const current = store.session(item.id);
+  // An in-flight read may complete after a pending Fork gets its own identity.
+  if (!current || current.forkPending || current.backend !== item.backend || current.nativeSessionId !== item.nativeSessionId) return;
+  const preview = conversationPreview(transcript);
+  if (!preview || (current.lastUserInput === preview.text && current.lastUserInputAt === (preview.createdAt ?? null))) return;
+  store.updateSession(item.id, { lastUserInput: preview.text, lastUserInputAt: preview.createdAt ?? null });
+  scheduleBroadcast();
+}
 function groupId(value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
   const id = text(value, '群组 ID');
@@ -162,6 +175,18 @@ app.use('/api', (req, res, next) => {
 
 app.get('/api/config', (_req, res) => res.json({ csrfToken: token }));
 app.get('/api/state', (_req, res) => res.json(state()));
+app.post('/api/directories/list', async (req, res) => {
+  res.json(await listDirectories(req.body.path, { showHidden: req.body.showHidden === true }));
+});
+app.get('/api/sessions/:id/conversation', async (req, res) => {
+  const item = session(String(req.params.id));
+  if (demo) return res.json({ messages: [], truncated: false, notice: '演示终端不保存原生对话；真实会话的已保存记录会显示在这里。' });
+  const transcript = await conversations.read(item);
+  const current = closing ? undefined : store.session(item.id);
+  if (!current || current.nativeSessionId !== item.nativeSessionId || current.forkPending !== item.forkPending) return res.status(409).json({ error: '会话身份已更新，请重新读取对话' });
+  updatePreview(item, transcript);
+  res.json(transcript);
+});
 app.get('/api/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Connection', 'keep-alive');
@@ -553,6 +578,37 @@ dsh.onStatusChange(scheduleNativePoll);
 const nativePoll = setInterval(() => { void pollNative(); }, 3000);
 nativePoll.unref();
 
+// Read saved prompts in bounded batches, independently from status and unread
+// notifications. Idle contacts also refresh, so externally continued sessions
+// acquire their latest input without launching or resuming a native process.
+const previewChecked = new Map<string, { identity: string; at: number }>();
+let previewPolling = false;
+async function pollPreviews() {
+  if (demo || closing || previewPolling) return;
+  previewPolling = true;
+  try {
+    const contacts = publisher.sessions();
+    const liveIds = new Set(contacts.map(item => item.id));
+    for (const id of previewChecked.keys()) if (!liveIds.has(id)) previewChecked.delete(id);
+    const pending = contacts.filter(item => {
+      if (item.archived || item.forkPending || !item.nativeSessionId) return false;
+      const checked = previewChecked.get(item.id);
+      return !checked || checked.identity !== `${item.backend}:${item.nativeSessionId}` || Date.now() - checked.at >= (item.running ? 5000 : 60_000);
+    }).sort((a, b) => (previewChecked.get(a.id)?.at ?? 0) - (previewChecked.get(b.id)?.at ?? 0)).slice(0, 8);
+    await Promise.all(Array.from({ length: Math.min(2, pending.length) }, async () => {
+      while (pending.length && !closing) {
+        const item = pending.shift()!;
+        previewChecked.set(item.id, { identity: `${item.backend}:${item.nativeSessionId}`, at: Date.now() });
+        try { updatePreview(item, await conversations.read(item)); }
+        catch { /* Native history can disappear or become temporarily unreadable. */ }
+      }
+    }));
+  } finally { previewPolling = false; }
+}
+const previewPoll = setInterval(() => { void pollPreviews(); }, 5000);
+previewPoll.unref();
+void pollPreviews();
+
 app.use('/api', (_req, res) => res.status(404).json({ error: '接口不存在' }));
 if (process.argv.includes('--dev')) {
   const { createServer: createViteServer } = await import('vite');
@@ -576,6 +632,7 @@ server.listen(port, host, () => console.log(`SessionDeck${demo ? ' [演示模式
 function shutdown(exitCode = 0) {
   if (closing) return; closing = true;
   clearInterval(nativePoll);
+  clearInterval(previewPoll);
   if (nativeScheduled) clearTimeout(nativeScheduled);
   if (scheduled) clearTimeout(scheduled);
   for (const timer of identityTimers) clearTimeout(timer);

@@ -12,6 +12,7 @@ import type { SessionStatus } from '../shared/types.js';
 import { OwnedProcess } from './owned-process.ts';
 import { sameDirectory } from './paths.ts';
 import { DeliveryNotAcceptedError } from './delivery.ts';
+import type { DshHistory } from './conversation.ts';
 
 export interface DshBridgeOptions {
   port?: number;
@@ -382,6 +383,14 @@ export class DshBridge {
     if (!text.trim()) throw new Error('消息不能为空');
     if (!this.ready) throw new Error('请先打开 DeepSeek Harness 会话');
     await this.rpc('session.prompt', { sessionId: id, mode: 'queue', content: [{ type: 'text', text }] });
+  }
+
+  /** Native history is explicitly read-only: it never attaches or resumes an
+   * Agent. Reading a card must also never start a stopped native Web service. */
+  async readHistory(id: string, maxMessages = 200): Promise<DshHistory | undefined> {
+    validateNativeId('dsh', id);
+    if (!this.ready) return undefined;
+    return this.rpc<DshHistory>('session.history', { sessionId: id, maxMessages: Math.max(1, Math.min(200, Math.floor(maxMessages))) });
   }
 
   async stopSession(id: string): Promise<void> {
