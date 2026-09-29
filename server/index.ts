@@ -198,7 +198,7 @@ function captureTerminalImage(req: express.Request, res: express.Response, next:
   const suppliedGeneration = req.headers['x-sessiondeck-terminal'];
   if (typeof suppliedGeneration !== 'string' || !generation || suppliedGeneration !== generation)
     return res.status(409).json({ error: '原生终端已重启，请重新连接后粘贴图片' });
-  if (!item || item.backend !== 'codex' || !item.running || item.interactionMode !== 'terminal')
+  if (!item || item.backend !== 'codex' || !item.running || item.interactionMode === 'chat')
     return res.status(409).json({ error: '只有正在运行的 Codex 原生终端可以接收图片' });
   if (item.status === 'waiting_approval') return res.status(409).json({ error: '原生会话正在等待审批，请先完成审批后再添加图片' });
   pendingTerminalImages.set(req, { id, generation, type });
@@ -224,7 +224,7 @@ app.post('/api/sessions/:id/terminal/image', captureTerminalImage,
       await chmod(temporary, 0o600);
       // The PTY may have been stopped/replaced while the body was buffered.
       const current = store.session(pending.id);
-      if (!current || !current.running || current.interactionMode !== 'terminal' || terminals.generation(pending.id) !== pending.generation)
+      if (!current || !current.running || current.interactionMode === 'chat' || terminals.generation(pending.id) !== pending.generation)
         fail('原生终端已重启，请重新粘贴图片', 409);
       await rename(temporary, target);
       temporary = null;
