@@ -1,14 +1,20 @@
 import * as pty from 'node-pty';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { TerminalReplay } from './terminal-replay.ts';
 import { OwnedProcess } from './owned-process.ts';
 import type { Session, SessionStatus } from '../shared/types.ts';
 
 export interface LaunchCommand { file: string; args: string[]; nativeSessionId?: string; env?: Record<string, string> }
-interface LiveTerminal { process: pty.IPty; owner: OwnedProcess; replay: TerminalReplay; tail: string; paused: boolean }
+interface LiveTerminal { process: pty.IPty; owner: OwnedProcess; replay: TerminalReplay; tail: string; paused: boolean; generation: string }
 
 export function stripTerminal(text: string): string {
   return text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
+}
+
+/** Keep a pasted absolute path as one token for native TUI path detection. */
+export function terminalPathToken(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Hints are explicitly marked as terminal estimates, never native truth. */
@@ -29,6 +35,7 @@ export class Terminals extends EventEmitter {
   private stopping = new Map<string, Promise<void>>();
   private closed = false;
   has(id: string) { return this.live.has(id); }
+  generation(id: string) { return this.live.get(id)?.generation ?? null; }
   isStopping(id: string) { return this.stopping.has(id); }
   buffer(id: string) { return this.live.get(id)?.replay.snapshot() ?? this.ended.get(id) ?? ''; }
   start(session: Session, command: LaunchCommand) {
@@ -44,7 +51,7 @@ export class Terminals extends EventEmitter {
     let exited!: () => void;
     const exit = new Promise<void>(accept => { exited = accept; });
     const owner = new OwnedProcess(child.pid, exit, signal => child.kill(signal));
-    const live: LiveTerminal = { process: child, owner, replay: new TerminalReplay(), tail: '', paused: false };
+    const live: LiveTerminal = { process: child, owner, replay: new TerminalReplay(), tail: '', paused: false, generation: randomUUID() };
     this.live.set(session.id, live);
     child.onData(data => {
       if (this.live.get(session.id) !== live) return;
@@ -79,6 +86,11 @@ export class Terminals extends EventEmitter {
     // A single line is safe even if a native TUI doesn't implement bracketed paste.
     const clean = text.replace(/[\r\n]+/g, '  ').replace(/[\x00-\x1f\x7f]/g, '');
     this.input(id, `\x1b[200~${clean}\x1b[201~`);
+  }
+  stagePath(id: string, path: string, expectedGeneration?: string) {
+    const actual = this.generation(id);
+    if (!actual || (expectedGeneration && actual !== expectedGeneration)) throw new Error('原生终端已重启，请重新粘贴图片');
+    this.stage(id, terminalPathToken(path));
   }
   resize(id: string, cols: number, rows: number) {
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 10 || cols > 500 || rows < 3 || rows > 300) return;

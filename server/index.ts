@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { statSync, existsSync } from 'node:fs';
+import { statSync, existsSync, mkdirSync } from 'node:fs';
+import { chmod, rename, unlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Store } from './store.ts';
@@ -21,6 +22,7 @@ import { StatePublisher } from './state.ts';
 import { listDirectories, normalizeDirectoryInput } from './directories.ts';
 import { ConversationReader, conversationPreview } from './conversation.ts';
 import { registerCodexChat } from './chat-api.ts';
+import { MAX_TERMINAL_IMAGE_BYTES, TERMINAL_IMAGE_TYPES, type TerminalImageType } from '../shared/terminal-images.ts';
 import type { Backend, BackendInfo, Session, AppState, SessionStatus, ConversationTranscript } from '../shared/types.ts';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -33,6 +35,10 @@ const demo = process.env.SESSIONDECK_DEMO === '1';
 const dataDir = resolve(process.env.SESSIONDECK_DATA_DIR || join(homedir(), '.local/share', demo ? 'sessiondeck-demo' : 'sessiondeck'));
 const instanceLock = await acquireInstanceLock(dataDir);
 const store = new Store(join(dataDir, 'sessiondeck.sqlite'));
+// Uploaded images live outside every workspace. They intentionally survive a
+// service restart so the native Codex composer can still read a pasted path.
+const terminalImageDir = join(dataDir, 'terminal-images');
+mkdirSync(terminalImageDir, { recursive: true, mode: 0o700 });
 const token = randomBytes(32).toString('hex');
 const instanceId = randomUUID();
 const terminals = new Terminals();
@@ -165,6 +171,71 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
   next();
 });
+
+type PendingTerminalImage = { id: string; generation: string; type: TerminalImageType };
+const pendingTerminalImages = new WeakMap<express.Request, PendingTerminalImage>();
+const imageExtension: Record<TerminalImageType, string> = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+function imageType(value: unknown): TerminalImageType | null {
+  const type = typeof value === 'string' ? value.split(';', 1)[0].trim().toLowerCase() : '';
+  return (TERMINAL_IMAGE_TYPES as readonly string[]).includes(type) ? type as TerminalImageType : null;
+}
+function hasImageSignature(body: Buffer, type: TerminalImageType): boolean {
+  if (type === 'image/png') return body.length >= 8 && body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (type === 'image/jpeg') return body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff;
+  if (type === 'image/gif') return body.length >= 6 && (body.subarray(0, 6).toString('ascii') === 'GIF87a' || body.subarray(0, 6).toString('ascii') === 'GIF89a');
+  return body.length >= 12 && body.subarray(0, 4).toString('ascii') === 'RIFF' && body.subarray(8, 12).toString('ascii') === 'WEBP';
+}
+function captureTerminalImage(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!validToken(req.headers['x-sessiondeck-token'], token)) return res.status(403).json({ error: '操作凭证已过期，请刷新页面' });
+  const type = imageType(req.headers['content-type']);
+  if (!type) return res.status(415).json({ error: '仅支持 PNG、JPEG、GIF 或 WebP 图片' });
+  const length = req.headers['content-length'];
+  if (typeof length === 'string' && /^\d+$/.test(length) && Number(length) > MAX_TERMINAL_IMAGE_BYTES)
+    return res.status(413).json({ error: '图片不能超过 10 MiB' });
+  const id = String(req.params.id);
+  const item = store.session(id);
+  const generation = terminals.generation(id);
+  const suppliedGeneration = req.headers['x-sessiondeck-terminal'];
+  if (typeof suppliedGeneration !== 'string' || !generation || suppliedGeneration !== generation)
+    return res.status(409).json({ error: '原生终端已重启，请重新连接后粘贴图片' });
+  if (!item || item.backend !== 'codex' || !item.running || item.interactionMode !== 'terminal' || !codexRuns.has(id))
+    return res.status(409).json({ error: '只有正在运行的 Codex 原生终端可以接收图片' });
+  if (item.status === 'waiting_approval') return res.status(409).json({ error: '原生会话正在等待审批，请先完成审批后再添加图片' });
+  pendingTerminalImages.set(req, { id, generation, type });
+  next();
+}
+// This route must precede express.json and the generic JSON-body guard. The
+// capture middleware runs before the raw parser receives any request bytes.
+app.post('/api/sessions/:id/terminal/image', captureTerminalImage,
+  express.raw({ type: () => true, limit: MAX_TERMINAL_IMAGE_BYTES }),
+  async (req, res, next) => {
+    const pending = pendingTerminalImages.get(req);
+    const body = Buffer.isBuffer(req.body) ? req.body : null;
+    let temporary: string | null = null;
+    let target: string | null = null;
+    try {
+      if (!pending || !body?.length) fail('图片正文为空');
+      if (body.length > MAX_TERMINAL_IMAGE_BYTES) fail('图片不能超过 10 MiB', 413);
+      if (!hasImageSignature(body, pending.type)) fail('图片内容与声明的格式不匹配', 415);
+      const name = randomUUID();
+      temporary = join(terminalImageDir, `.upload-${name}${imageExtension[pending.type]}`);
+      target = join(terminalImageDir, `${name}${imageExtension[pending.type]}`);
+      await writeFile(temporary, body, { mode: 0o600 });
+      await chmod(temporary, 0o600);
+      // The PTY may have been stopped/replaced while the body was buffered.
+      const current = store.session(pending.id);
+      if (!current || !current.running || current.interactionMode !== 'terminal' || terminals.generation(pending.id) !== pending.generation)
+        fail('原生终端已重启，请重新粘贴图片', 409);
+      await rename(temporary, target);
+      temporary = null;
+      terminals.stagePath(pending.id, target, pending.generation);
+      res.json({ staged: true });
+    } catch (error) {
+      if (temporary) await unlink(temporary).catch(() => undefined);
+      if (target) await unlink(target).catch(() => undefined);
+      next(error);
+    }
+  });
 app.use(express.json({ limit: '128kb' }));
 app.use('/api', (req, res, next) => {
   if (!['GET', 'HEAD'].includes(req.method) && !validToken(req.headers['x-sessiondeck-token'], token))
@@ -558,6 +629,9 @@ server.on('upgrade', (req, socket, head) => {
     ws.on('error', () => ws.close());
     (ws as WebSocket & { sessionId: string }).sessionId = id;
     ws.send(JSON.stringify({ type: 'data', data: terminals.buffer(id) }));
+    // The browser uses this per-PTY UUID to prevent an image upload from
+    // landing in a replacement process after a stop/restart race.
+    ws.send(JSON.stringify({ type: 'ready', terminalId: terminals.generation(id) }));
     ws.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());

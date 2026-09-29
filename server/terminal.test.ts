@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { Store } from './store.ts';
-import { Terminals } from './terminal.ts';
+import { terminalPathToken, Terminals } from './terminal.ts';
+
+test('terminal image path tokens preserve one native composer token', () => {
+  assert.equal(terminalPathToken('/tmp/session deck/a$b\'s.png'), "'/tmp/session deck/a$b'\\''s.png'");
+});
 
 async function until(check: () => boolean, description: string) {
   const deadline = Date.now() + 4000;
@@ -35,6 +39,25 @@ test('group staging strips embedded terminal controls and does not send a submit
   assert.equal(body, 'task  nextfield[31m');
   assert.doesNotMatch(body, /[\x00-\x1f\x7f]/);
   assert.equal(terminals.has(session.id), true, 'Control-C from task text must not stop the process');
+});
+
+test('PTY generations reject a stale staged image after replacement', { timeout: 8000 }, async t => {
+  const store = new Store(':memory:');
+  const terminals = new Terminals();
+  t.after(async () => { try { await terminals.close(); } finally { store.close(); } });
+  const session = store.addSession({ backend: 'codex', title: 'generation fixture', cwd: process.cwd() });
+  terminals.start(session, { file: process.execPath, args: ['-e', `process.stdout.write('READY');setInterval(()=>{},1000);`] });
+  await until(() => terminals.buffer(session.id).includes('READY'), 'Generation fixture did not start');
+  const first = terminals.generation(session.id);
+  assert.match(first ?? '', /^[a-f0-9-]{36}$/);
+  await terminals.stop(session.id);
+  terminals.start(session, { file: process.execPath, args: ['-e', `process.stdout.write('READY2');setInterval(()=>{},1000);`] });
+  await until(() => terminals.buffer(session.id).includes('READY2'), 'Replacement fixture did not start');
+  const second = terminals.generation(session.id);
+  assert.match(second ?? '', /^[a-f0-9-]{36}$/);
+  assert.notEqual(second, first);
+  assert.throws(() => terminals.stagePath(session.id, '/tmp/image.png', first!), /重启/);
+  assert.doesNotThrow(() => terminals.stagePath(session.id, '/tmp/image.png', second!));
 });
 
 test('late exit of a stopped PTY cannot stop or replace a newly started terminal for the same contact', { timeout: 8000 }, async t => {
