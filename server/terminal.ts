@@ -38,7 +38,7 @@ export class Terminals extends EventEmitter {
   generation(id: string) { return this.live.get(id)?.generation ?? null; }
   isStopping(id: string) { return this.stopping.has(id); }
   buffer(id: string) { return this.live.get(id)?.replay.snapshot() ?? this.ended.get(id) ?? ''; }
-  start(session: Session, command: LaunchCommand) {
+  start(session: Pick<Session, 'id' | 'cwd'>, command: LaunchCommand) {
     if (this.closed) throw new Error('终端管理服务正在关闭');
     if (this.stopping.has(session.id)) throw new Error('会话正在停止，请等待原生进程退出');
     if (this.live.has(session.id)) return;

@@ -130,3 +130,16 @@
 - 最终 `npm run verify` 通过生产构建、148 项后端测试、53 项浏览器测试，其中新增 12 项原生桥接、4 项 HTTP、2 项发送持久化及 7 项图形界面回归。桌面及 390px 窄屏截图已目检，日志 `artifacts/verify-codex-chat.log`，截图 `artifacts/codex-graphical-chat.png`、`artifacts/codex-graphical-mobile.png`。
 - 最终 `npm run test:smoke:codex-chat` 使用真实 Codex 0.158.0、临时 CODEX_HOME、精简环境和显式 loopback 模拟 Responses 服务通过：4 次本机模拟模型请求，图形发送／流式、去重、原生审批负向选项（取消本轮，确认命令未执行）、Fork 继承与独立、中断后继续、终端连接同一线程。无真实凭据或真实模型调用；当前环境不可用网络命名空间，测试没有宣称系统级网络隔离。报告 `artifacts/codex-chat-native-smoke.json`，该验证不代表真实账号和云端任务质量。
 - 收尾只读确认当前 `127.0.0.1:4317` 仍有 1 个运行中的会话，未停止或重启该服务。前端通过新增 `graphicalChat` 能力标识兼容旧后端；待当前任务结束，正常停止旧服务后执行 `./start.sh` 加载新版。所有版本管理只在本地进行，无 push、云端仓库修改或 tag。
+
+
+## 2026-09-29：独立 Shell、资源侧栏与精简卡片
+
+- 本地分支 `feat/workspace-shell-and-explorer`，基于 `461ae3d` 继续开发，保留此前未跟踪的 `tests/terminal-images.spec.ts`，不混入本次提交。
+- 底部面板改为真正的独立交互式 Shell PTY，复用现有 xterm、回放和进程管理；支持多标签、左右分屏、拖动高度、命令输入与 Ctrl+C。从联系人打开使用对应目录；无联系人也可从顶部打开。隐藏与刷新保留进程，关闭标签终止该 Shell，服务停止时回收托管进程。
+- 修复 Shell 创建响应迟到后选择错误工作目录、分屏/重连抢走输入焦点的问题。排查关闭子进程测试的偶发失败，发现 PTY 在 spawn 返回后可能改变进程 session；现在在核验 birth identity 后使用停止时的实际 session，保留 PID 重用与已脱离进程的保护。
+- 精简卡片高度、头像、元信息与统计，保留名称、状态、目录复制、最近输入、活动摘录及菜单操作。提示音有独立开关，默认开启，首次交互解锁；同批提醒节流，重复状态不重播，不依赖系统通知授权。
+- 资源管理器在页面侧栏或私聊侧栏显示，不遮挡私聊头部。支持文件树、刷新展开目录、Markdown/文本预览、Git 状态与彩色 diff；迟到请求不会覆盖新的选择。
+- 文件读取限制为 1 MiB，目录显示/扫描数量有界，校验路径、软链接和删除路径祖先。Git 覆盖 rename、删除、unborn 仓库和子目录范围；使用字面路径，禁用 ext-diff/textconv/fsmonitor、可选 index 锁与相关环境覆盖，512 KiB 输出上限和超时结果明确区分。
+- 最终 `npm run build`、`npm test`（167 项）、`npm run test:web`（61 项）与 `git diff --check` 全部通过。后端日志 `artifacts/verify-panels-backend.log`，浏览器日志 `artifacts/verify-panels-web.log`。浏览器通过真实 zsh 执行命令、分屏变量隔离、Ctrl+C、隐藏/刷新恢复、指定 cwd、自然退出、上下文切换竞态和重连焦点验证；文件/Git 使用临时独立 fixture。
+- 桌面 Shell、私聊侧栏及 390px 移动侧栏截图已目检，保存在 `artifacts/shell-terminal.png`、`artifacts/workspace-sidebar.png`、`artifacts/workspace-mobile.png`。资源管理器并发读取另经临时浏览器脚本验证。音频使用浏览器 AudioContext 桩验证触发、去重、静音及刷新持久化，未宣称实测扬声器音量。
+- 收尾只读检查正式 `127.0.0.1:4317` 服务仍有 2 个会话进程，本轮不终止或重启。新版后端需要正常停止旧服务后执行 `./start.sh`。仅本地开发、测试与提交，无云端操作。

@@ -4,6 +4,7 @@ import {
   ChevronRight, CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
   GitFork, Layers3, LoaderCircle, MessageSquare, Pencil, Pin, Play, Plus,
   Radio, Search, Send, Settings2, Share2, SlidersHorizontal, Square, UsersRound, X,
+  PanelBottomOpen, Volume2, VolumeX,
 } from 'lucide-react';
 import type { AppState, StatePatch, Backend, DiscoveredSession, Delivery, Group, GroupDetail, GroupMessage, Session, SessionStatus } from '../shared/types';
 import { applyStatePatch } from './state';
@@ -15,6 +16,8 @@ import DirectoryField from './DirectoryField';
 import { copyToClipboard } from './clipboard';
 import { useWorkspaceRoute, workspaceHash, type View } from './navigation';
 import ActivityView from './ActivityView';
+import WorkspaceExplorer from './WorkspaceExplorer';
+import ShellTerminalDock from './ShellTerminalDock';
 import { useContactFilters, useContactSort, type ContactSort } from './preferences';
 import { readLocalPreference, writeLocalPreference, useDialog } from './ui';
 
@@ -49,8 +52,6 @@ const relativeTime = (value: string) => {
   if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前`;
   return `${Math.floor(minutes / 1440)} 天前`;
 };
-const pad = (value: number) => String(value).padStart(2, '0');
-const stamp = (value: string) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '—' : `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`; };
 const shortPath = (path: string) => path.replace(/\/$/, '').split('/').filter(Boolean).slice(-2).join('/') || path;
 
 function BackendAvatar({ backend, small = false }: { backend: Backend; small?: boolean }) {
@@ -89,12 +90,16 @@ export default function App() {
   const [contactSort, setContactSort] = useContactSort();
   const [modal, setModal] = useState<Modal>(null);
   const [selection, setSelection] = useState('');
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspaceSessionId, setWorkspaceSessionId] = useState<string | null>(null);
   const [privateViews, setPrivateViews] = useState<Record<string, string>>(() => Object.fromEntries(
     ['claude', 'codex', 'dsh'].map(backend => {
       const saved = readLocalPreference(`sessiondeck.private-view.${backend}`);
       return [backend, saved === 'terminal' || saved === 'conversation' || saved === 'chat' ? saved : backend === 'codex' ? 'chat' : 'terminal'];
     }),
   ));
+  const [terminalPanelOpen, setTerminalPanelOpen] = useState(false);
+  const [terminalSessionId, setTerminalSessionId] = useState<string | undefined>();
   const selectPrivateView = (backend: Backend, mode: 'conversation' | 'terminal' | 'chat') => {
     setPrivateViews(current => ({ ...current, [backend]: mode }));
     writeLocalPreference(`sessiondeck.private-view.${backend}`, mode);
@@ -110,6 +115,10 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [notifications, setNotifications] = useState(() => typeof Notification !== 'undefined' && Notification.permission === 'granted' && readLocalPreference('sessiondeck.notifications') === 'on');
   const notificationRef = useRef(notifications);
+  const [soundEnabled, setSoundEnabled] = useState(() => readLocalPreference('sessiondeck.sound') !== 'off');
+  const soundRef = useRef(soundEnabled);
+  const lastSoundRef = useRef(-Infinity);
+  const notificationAudioRef = useRef<AudioContext | null>(null);
   const sessionsRef = useRef<Session[] | null>(null);
   const stateRevisionRef = useRef(0);
   const stateRef = useRef<AppState | null>(null);
@@ -126,6 +135,51 @@ export default function App() {
   const selectedParent = state?.sessions.find((session) => session.id === selected?.parentId);
   useDialog(drawerRef, !!selected, () => setSelectedId(null), true);
   notificationRef.current = notifications;
+  soundRef.current = soundEnabled;
+
+  const openTerminalPanel = useCallback((sessionId?: string) => {
+    if (sessionId) setTerminalSessionId(sessionId);
+    setSelectedId(null);
+    setTerminalPanelOpen(true);
+  }, [setSelectedId]);
+
+  const notificationSound = useCallback((unlock = false) => {
+    if (typeof window === 'undefined') return;
+    const AudioContextCtor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    try {
+      const context = notificationAudioRef.current ?? new AudioContextCtor();
+      notificationAudioRef.current = context;
+      if (context.state === 'suspended') void context.resume().catch(() => {});
+      if (unlock || context.state !== 'running') return;
+      if (performance.now() - lastSoundRef.current < 800) return;
+      lastSoundRef.current = performance.now();
+      const now = context.currentTime;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, now);
+      oscillator.frequency.exponentialRampToValueAtTime(660, now + 0.12);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.075, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+      oscillator.connect(gain); gain.connect(context.destination);
+      oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+      oscillator.start(now); oscillator.stop(now + 0.18);
+    } catch {
+      // Audio is an optional enhancement. Browser policy or missing audio
+      // devices must never prevent state updates and system notifications.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!soundEnabled) return;
+    const unlock = () => notificationSound(true);
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => { window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock); };
+  }, [soundEnabled, notificationSound]);
+  useEffect(() => () => { void notificationAudioRef.current?.close().catch(() => {}); notificationAudioRef.current = null; }, []);
 
   const notify = useCallback((message: string) => { setToast(message); clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(''), 4200); }, []);
   const acceptState = useCallback((next: AppState) => {
@@ -142,10 +196,12 @@ export default function App() {
     }
     stateRevisionRef.current += 1;
     setConnectionError('');
-    if (notificationRef.current && sessionsRef.current && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    if (sessionsRef.current) {
       for (const session of next.sessions) {
         const previous = sessionsRef.current.find((old) => old.id === session.id);
         if (previous && !session.archived && attention(session) && session.unread > previous.unread) {
+          if (soundRef.current) notificationSound();
+          if (!notificationRef.current || typeof Notification === 'undefined' || Notification.permission !== 'granted') continue;
           try {
             const notification = new Notification(`${session.title} · ${STATUS[session.status].label}`, { body: session.statusDetail || '点击进入会话继续处理', tag: session.id, icon: '/favicon.svg' });
             notification.onclick = () => { window.focus(); setSelectedId(session.id); setSelection(''); notification.close(); void api(`/sessions/${session.id}/read`, {}).catch(() => {}); };
@@ -157,7 +213,7 @@ export default function App() {
       }
     }
     stateRef.current = next; sessionsRef.current = next.sessions; setState(next);
-  }, [setSelectedId]);
+  }, [notificationSound, setSelectedId]);
   const refresh = useCallback(async () => {
     const revision = stateRevisionRef.current;
     try { const next = await api<AppState>('/state'); acceptState(next); }
@@ -192,6 +248,7 @@ export default function App() {
     setModal(null); setSelection('');
   }, [view]);
   useEffect(() => { setSelection(''); setModal(null); }, [selectedId]);
+  useEffect(() => { if (selectedId) setWorkspaceSessionId(selectedId); }, [selectedId]);
   useEffect(() => {
     if (!selected?.id || document.visibilityState !== 'visible') return;
     void api(`/sessions/${selected.id}/read`, {}).catch((cause) => setError(cause.message));
@@ -275,6 +332,7 @@ export default function App() {
   const toggleNotifications = async () => {
     if (notifications) { setNotifications(false); writeLocalPreference('sessiondeck.notifications', 'off'); return; }
     if (typeof Notification === 'undefined') { notify('当前浏览器不支持系统通知，卡片提醒始终可用'); return; }
+    if (soundRef.current) notificationSound(true);
     try {
       const permission = await Notification.requestPermission();
       if (permission === 'granted') { setNotifications(true); writeLocalPreference('sessiondeck.notifications', 'on'); notify('已开启通知，需要你时会提醒'); }
@@ -315,6 +373,7 @@ export default function App() {
 
   const listView = !!state && view !== 'activity' && view !== 'backends';
   const connectionLabel = connected ? '本地服务已连接' : hasConnected ? '连接中断 · 正在重连' : '正在连接本地服务';
+  const workspaceSession = sessions.find(session => session.id === workspaceSessionId) ?? sessions.find(session => !session.archived);
 
   return <div className="app-shell">
     <header className="topbar" inert={!!selected || !!modal}>
@@ -334,6 +393,7 @@ export default function App() {
           <button className="icon-button" disabled={!state} aria-label="创建群组" title="创建群组" onClick={() => setModal({ type: 'group' })}><Plus size={16} /></button>
         </div>
         <div className="topbar-actions">
+          <button className={`icon-button ${terminalPanelOpen ? 'active' : ''}`} aria-label="打开终端" title={terminalPanelOpen ? '终端面板已打开' : '打开底部终端'} disabled={!state} onClick={() => openTerminalPanel()}><PanelBottomOpen size={17} /></button>
           {listView && <><label className="search-field"><Search size={15} /><input id="session-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索" aria-label="搜索联系人" /><kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></label>
             <FilterMenu active={backendFilter !== 'all' || statusFilter !== 'all'} reset={() => { setBackendFilter('all'); setStatusFilter('all'); }}>
               <div className="filter-group"><span>后端</span><div className="backend-tabs" aria-label="按后端筛选"><button aria-pressed={backendFilter === 'all'} className={backendFilter === 'all' ? 'selected' : ''} onClick={() => setBackendFilter('all')}>全部</button>{(['claude', 'codex', 'dsh'] as Backend[]).map((backend) => <button key={backend} aria-pressed={backendFilter === backend} className={backendFilter === backend ? 'selected' : ''} onClick={() => setBackendFilter(backend)}>{BACKEND[backend].short}</button>)}</div></div>
@@ -342,15 +402,22 @@ export default function App() {
             </FilterMenu></>}
           {state?.demo && <span className="demo-badge" title="演示模式 · 示例数据">演示模式 · 示例数据</span>}
           <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
+          <button className={`icon-button ${soundEnabled ? 'enabled' : ''}`} title={soundEnabled ? '关闭提示音' : '开启提示音'} aria-label={soundEnabled ? '关闭提示音' : '开启提示音'} aria-pressed={soundEnabled} onClick={() => { const enabled = !soundEnabled; setSoundEnabled(enabled); writeLocalPreference('sessiondeck.sound', enabled ? 'on' : 'off'); if (enabled) notificationSound(); }}>{soundEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}</button>
           <button className={`icon-button ${notifications ? 'enabled' : ''}`} title={notifications ? '关闭系统通知' : '开启系统通知'} aria-label={notifications ? '关闭系统通知' : '开启系统通知'} onClick={() => void toggleNotifications()}>{notifications ? <Bell size={17} /> : <BellOff size={17} />}</button>
           <button className={`icon-button ${view === 'backends' ? 'active' : ''}`} aria-label="连接与能力" title="连接与能力" onClick={() => navigate('backends')}><Settings2 size={17} /></button>
           <button className="icon-button" aria-label="使用说明与快捷键" title="使用说明与快捷键（?）" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17} /></button>
+          <button className={`icon-button ${workspaceOpen ? 'active' : ''}`} aria-label="打开资源管理器" title="打开资源管理器" disabled={!workspaceSession} onClick={() => setWorkspaceOpen((value) => !value)}><Folder size={17} /></button>
           <button className="icon-button" aria-label="导入会话" title="导入本机已有会话" disabled={!state} onClick={() => setModal({ type: 'import' })}><ArrowDownToLine size={17} /></button>
           <button className="button primary new-contact" aria-label="新建联系人" disabled={!state} onClick={() => setModal({ type: 'create' })}><Plus size={15} /><span>新建联系人</span></button>
         </div>
       </div>
     </header>
 
+    <div className="workspace-layout" inert={!!selected || !!modal}>
+      {workspaceOpen && workspaceSession && !selected && <div className="workspace-sidebar">
+        <label className="workspace-picker">工作目录<select aria-label="资源管理器工作区" value={workspaceSession.id} onChange={event => setWorkspaceSessionId(event.target.value)}>{sessions.filter(session => !session.archived || session.id === workspaceSession.id).map(session => <option key={session.id} value={session.id}>{session.title} · {shortPath(session.cwd)}</option>)}</select></label>
+        <WorkspaceExplorer key={workspaceSession.id} session={workspaceSession} close={() => setWorkspaceOpen(false)} />
+      </div>}
     <main className="main-content" inert={!!selected || !!modal}>
       <h1 className="sr-only">{title}</h1>
       {state && !connected && <div className="connection-banner" role="status"><Radio size={15} /><span>{hasConnected ? '服务连接已中断，正在自动重连。卡片暂时显示上次收到的状态。' : '正在建立实时连接，卡片显示最近获取的状态。'}</span><button className="text-button" onClick={() => void refresh().catch(() => {})}>重新获取</button></div>}
@@ -359,7 +426,7 @@ export default function App() {
 
       {!state && !connectionError && <div className="loading-state"><LoaderCircle className="spin" size={22} /><p>正在连接你的工作空间…</p></div>}
       {state && view === 'activity' ? <ActivityView activities={state.activities} sessions={state.sessions} open={openSession} /> : state && view === 'backends' ? <BackendSettings state={state} refresh={() => void run('refresh', () => api('/backends/refresh', {}), '已重新检测本机后端')} onCreate={(backend) => { setBackendFilter(backend); setModal({ type: 'create', backend }); }} /> : state && <>
-          {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} forks={sessions.filter((item) => item.parentId === session.id).length} groupName={state.groups.find((group) => group.id === session.groupId)?.title} showGroup={!currentGroup} available={state.backends.find((backend) => backend.id === session.backend)?.installed ?? false} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={() => openSession(session)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
+          {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={() => openSession(session)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
 
           {currentGroup && groupError && <div className="error-banner" role="alert"><span>群组动态加载失败：{groupError}</span><button className="text-button" onClick={() => setGroupReload((value) => value + 1)}>重试群组动态</button></div>}
           {currentGroup && !groupError && (!detail || detail.group.id !== currentGroup.id) && <div className="loading-state" role="status"><LoaderCircle size={20} className="spin" /><p>正在读取群组动态…</p></div>}
@@ -369,6 +436,9 @@ export default function App() {
         </>}
     </main>
 
+    </div>
+    {state && <ShellTerminalDock open={terminalPanelOpen} sessionId={terminalSessionId} onClose={() => setTerminalPanelOpen(false)} inert={!!selected || !!modal} />}
+
     {selected && state && <div className="drawer-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedId(null); }}><section ref={drawerRef} inert={!!modal} className="session-drawer" role="dialog" aria-modal="true" aria-label={`${selected.title} 的私聊`}>
       <header className="drawer-header">
         <BackendAvatar backend={selected.backend} />
@@ -376,6 +446,8 @@ export default function App() {
           <p>{BACKEND[selected.backend].name}<span>·</span>{selected.forkPending ? '等待原生 Fork' : selected.nativeSessionId ? `会话 ${selected.nativeSessionId.slice(0, 12)}` : '新会话，启动后连接'}<span>·</span><span className="drawer-cwd" title={selected.cwd}>{selected.cwd}</span><button className="icon-button" aria-label="复制工作目录" title="复制工作目录" onClick={() => void copyText(selected.cwd, '工作目录')}><Copy size={12} /></button></p></div>
         <div className="drawer-actions">
           {selected.running ? <button className="button secondary small-button" disabled={!!busy} onClick={() => void run(`stop:${selected.id}`, () => api(`/sessions/${selected.id}/stop`, {}), selected.backend === 'dsh' && !state.demo ? '已停止当前任务，原生会话历史仍保留' : '已停止进程，原生会话历史仍保留')}><Square size={12} />{selected.backend === 'dsh' && !state.demo ? '停止当前任务' : selected.interactionMode === 'chat' ? '停止会话' : '停止进程'}</button> : <button className="button primary small-button" disabled={!!busy || selected.archived || !selectedBackend?.installed} onClick={() => void run(`start:${selected.id}`, () => api(`/sessions/${selected.id}/start`, { mode: codexChatAvailable && privateView === 'chat' ? 'chat' : 'terminal' }))}>{busy === `start:${selected.id}` ? <LoaderCircle size={13} className="spin" /> : <Play size={13} />}{selected.forkPending ? '启动 Fork 会话' : selected.nativeSessionId ? '恢复原生会话' : '启动原生会话'}</button>}
+          <button className={`button secondary small-button ${terminalPanelOpen ? 'active' : ''}`} onClick={() => openTerminalPanel(selected.id)}><PanelBottomOpen size={13} /> 终端面板</button>
+          <button className={`button secondary small-button ${workspaceOpen ? 'active' : ''}`} onClick={() => setWorkspaceOpen((value) => !value)}><Folder size={13} /> 资源管理器</button>
           <button className="button secondary small-button" disabled={!selectedBackend?.capabilities.fork || !selected.nativeSessionId || selected.forkPending} title={!selected.nativeSessionId || selected.forkPending ? '请先启动来源会话并完成初始化，再进行 Fork' : '分叉当前上下文'} onClick={() => setModal({ type: 'fork', session: selected, groupId: selected.groupId ?? undefined })}><GitFork size={13} /> Fork</button>
           {selected.groupId && <button className="button secondary small-button" onClick={() => setModal({ type: 'share', session: selected, text: selection })}><Share2 size={13} /> 分享结果到群组</button>}
           {selected.nativeUrl && <a className="button secondary small-button" target="_blank" rel="noreferrer" href={selected.nativeUrl}><ExternalLink size={13} /> 原生窗口</a>}
@@ -389,8 +461,12 @@ export default function App() {
       {selected.archived && <div className="session-status-detail"><Archive size={14} />此联系人已归档，恢复到列表后可以继续运行。<button className="text-button" onClick={() => void patch(selected, { archived: false })}>恢复联系人</button></div>}
       {selected.unread > 0 && <div className="session-unread-notice" role="status" aria-live="polite"><Bell size={14} /><span>这个会话有 {selected.unread} 条新提醒</span><button className="text-button" disabled={!!busy} onClick={() => void run(`read:${selected.id}`, () => api(`/sessions/${selected.id}/read`, {}))}>标为已读</button></div>}
       {selected.statusDetail && <div role="status" aria-live="polite" className={`session-status-detail ${attention(selected) ? 'needs-attention' : ''}`}><span className={`status-point ${STATUS[selected.status].className}`} />{selected.statusDetail}<span className="source-label">{selected.statusSource === 'native' ? '后端状态' : selected.statusSource === 'terminal' ? '终端估测' : selected.statusSource === 'manual' ? '手动标记' : '进程状态'}</span></div>}
+      <div className={`session-workspace ${workspaceOpen ? 'explorer-open' : ''}`}>
+      {workspaceOpen && <WorkspaceExplorer key={selected.id} session={selected} close={() => setWorkspaceOpen(false)} />}
+      <div className="session-conversation">
       {(selected.backend !== 'dsh' || state.demo) && <div className="private-view-switch" role="group" aria-label="会话显示方式"><button aria-pressed={privateView !== 'terminal'} onClick={() => switchPrivateView(codexChatAvailable ? 'chat' : 'conversation')}><MessageSquare size={14} />{codexChatAvailable ? '图形对话' : '对话记录'}</button><button aria-pressed={privateView === 'terminal'} disabled={!!busy} onClick={() => switchPrivateView('terminal')}><Command size={14} />原生终端</button><span>同一个会话，切换视图不重启</span></div>}
       {selected.backend === 'dsh' && !state.demo ? selected.nativeUrl ? <div className="native-web"><iframe title="DeepSeek Harness 会话" src={selected.nativeUrl} allow="clipboard-read; clipboard-write" /></div> : <div className="terminal-empty"><BackendAvatar backend="dsh" /><h3>直接使用 Harness 原生界面</h3><p>点击“{selected.forkPending ? '启动 Fork 会话' : selected.nativeSessionId ? '恢复原生会话' : '启动原生会话'}”，进入这个联系人的上下文。</p></div> : privateView === 'chat' ? <Suspense fallback={<div className="loading-state"><LoaderCircle size={22} className="spin" /><p>正在加载对话…</p></div>}><CodexChatPane key={selected.id} session={selected} onTerminal={() => switchPrivateView('terminal')} onSelection={setSelection} /></Suspense> : privateView === 'conversation' ? <ConversationPane key={selected.id} session={selected} onTerminal={() => switchPrivateView('terminal')} onSelection={setSelection} /> : codexChatAvailable && selected.running && selected.interactionMode === 'chat' ? <div className="terminal-empty"><Command size={26} /><h3>连接同一个 Codex 会话</h3><button className="button primary" disabled={!!busy} onClick={() => switchPrivateView('terminal')}>连接原生终端</button></div> : <TerminalPane key={selected.id} sessionId={selected.id} running={selected.running} status={selected.status} allowImages={selected.backend === 'codex' && !state.demo} onSelection={setSelection} />}
+      </div></div>
     </section></div>}
 
     {modal?.type === 'help' && <HelpDialog close={closeModal} />}
@@ -400,8 +476,8 @@ export default function App() {
   </div>;
 }
 
-function SessionCard({ session, groupName, showGroup, forks, available, canFork, onOpen, onRename, onFork, onPin, onArchive, onCopyDirectory }: {
-  session: Session; groupName?: string; showGroup: boolean; forks: number; available: boolean; canFork: boolean; onOpen: () => void; onRename: () => void; onFork: () => void; onPin: () => void; onArchive: () => void; onCopyDirectory: () => void;
+function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArchive, onCopyDirectory }: {
+  session: Session; canFork: boolean; onOpen: () => void; onRename: () => void; onFork: () => void; onPin: () => void; onArchive: () => void; onCopyDirectory: () => void;
 }) {
   const [menu, setMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -423,24 +499,20 @@ function SessionCard({ session, groupName, showGroup, forks, available, canFork,
     return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape); };
   }, [menu]);
   const preview = session.statusDetail || (session.forkPending ? '启动时将通过原生能力分叉上下文' : session.nativeSessionId ? '上下文已连接，点击继续' : '准备就绪，点击进入会话');
-  const origin = session.origin === 'forked' ? 'Fork' : session.origin === 'imported' ? '导入' : '新建';
   return <article onClick={(event) => { if (!(event.target as Element).closest('button, a, .dropdown-menu')) onOpen(); }} className={`session-card tone-${STATUS[session.status].className} ${attention(session) ? 'has-attention' : ''} ${session.unread > 0 && !session.archived ? 'has-unread' : ''} ${session.archived ? 'archived-card' : ''}`}>
     <div className="card-head">
       <span className="avatar-wrap"><BackendAvatar backend={session.backend} />{session.unread > 0 && <span className="unread-badge" aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</span>}</span>
       <div className="card-title">
-        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={onOpen}><h3 title={session.title}>{session.title}</h3></button><button className="card-rename" aria-label={`给 ${session.title} 改名`} onClick={onRename}>改名</button>{session.pinned && <Pin size={11} className="pinned-icon" aria-label="已置顶" />}</div>
+        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={onOpen}><h3 title={session.title}>{session.title}</h3></button>{session.pinned && <Pin size={11} className="pinned-icon" aria-label="已置顶" />}</div>
         <dl className="card-meta">
-          <div><dt>{BACKEND[session.backend].short}</dt><dd title={session.nativeSessionId ?? undefined}>{session.nativeSessionId ? session.nativeSessionId.slice(0, 12) : session.forkPending ? '等待 Fork' : '未启动'}</dd></div>
           <div className="card-directory"><dt>目录</dt><dd title={session.cwd}>{shortPath(session.cwd)}</dd><button className="icon-button card-copy-directory" aria-label={`复制 ${session.title} 的工作目录`} title={`复制工作目录：${session.cwd}`} onClick={onCopyDirectory}><Copy size={12} /></button></div>
-          <div><dt>{showGroup && session.groupId ? '群组' : '来源'}</dt><dd>{showGroup && session.groupId ? groupName ?? '群组成员' : origin}{!available && <span className="not-installed"> · 后端未安装</span>}</dd></div>
         </dl>
       </div>
       <span className="card-state"><StatusBadge session={session} /></span>
     </div>
     {session.lastUserInput && <div className="card-prompt"><span>最近输入</span><p title={session.lastUserInput}>{session.lastUserInput}</p></div>}
-    <div className="card-activity"><span className="activity-chip" title={preview}>{preview}</span><time dateTime={session.lastActivity} title={new Date(session.lastActivity).toLocaleString('zh-CN')}>{stamp(session.lastActivity)}</time>
+    <div className="card-activity"><span className="activity-chip" title={preview}>{preview}</span><time dateTime={session.lastActivity} title={new Date(session.lastActivity).toLocaleString('zh-CN')}>{relativeTime(session.lastActivity)}</time>
       <span className="card-menu-anchor" ref={menuRef}><button ref={menuButtonRef} className="icon-button" aria-label={`${session.title} 的更多操作`} aria-expanded={menu} onClick={() => setMenu(!menu)}><Ellipsis size={15} /></button>{menu && <div className="dropdown-menu"><button onClick={() => { menuButtonRef.current?.focus(); onRename(); setMenu(false); }}><Pencil size={14} />改名</button><button onClick={() => { menuButtonRef.current?.focus(); onPin(); setMenu(false); }}><Pin size={14} />{session.pinned ? '取消置顶' : '置顶联系人'}</button><button disabled={!canFork} title={canFork ? undefined : !session.nativeSessionId || session.forkPending ? '请先启动原生会话并完成初始化' : '该后端暂不可 Fork'} onClick={() => { menuButtonRef.current?.focus(); onFork(); setMenu(false); }}><GitFork size={14} />Fork 会话</button><span /><button onClick={() => { onArchive(); setMenu(false); }}><Archive size={14} />{session.archived ? '恢复到列表' : '归档联系人'}</button></div>}</span></div>
-    <div className="card-stats"><div className={session.unread ? 'hot' : ''}><strong>{session.unread}</strong><span>未读提醒</span></div><div><strong>{forks}</strong><span>Fork 分支</span></div><div><strong className="text-value">{relativeTime(session.lastActivity)}</strong><span>最近活动</span></div></div>
   </article>;
 }
 

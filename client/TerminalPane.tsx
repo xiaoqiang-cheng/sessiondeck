@@ -6,13 +6,15 @@ import '@xterm/xterm/css/xterm.css';
 import { getToken, uploadTerminalImage } from './api';
 import { MAX_TERMINAL_IMAGE_BYTES, TERMINAL_IMAGE_TYPES } from '../shared/terminal-images';
 
-export default function TerminalPane({ sessionId, running, status, allowImages, onSelection }: {
+export default function TerminalPane({ sessionId, running, status, allowImages, onSelection, channel = 'session', onExit, focusRequest }: {
   sessionId: string; running: boolean; status?: string; allowImages?: boolean; onSelection: (text: string) => void;
+  channel?: 'session' | 'shell'; onExit?: (exitCode: number) => void; focusRequest?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const selectionRef = useRef(onSelection);
+  const exitRef = useRef(onExit);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
@@ -25,7 +27,9 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
   const uploadAbortRef = useRef<AbortController | null>(null);
   const uploadingRef = useRef(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const previousFullscreenRef = useRef(fullscreen);
   selectionRef.current = onSelection;
+  exitRef.current = onExit;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -34,6 +38,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
     let reconnect: ReturnType<typeof setTimeout> | undefined;
     let everConnected = false;
     let attempts = 0;
+    let acceptsInput = running;
     setConnected(false); setError(''); setCopied(false);
     terminalIdRef.current = null; setTerminalId(null); setImageStatus('');
     uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; setUploadingImage(false);
@@ -56,7 +61,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
       if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey && (event.metaKey || event.ctrlKey)) { setFullscreen((value) => !value); return false; }
       return true;
     });
-    terminal.textarea?.setAttribute('aria-label', '原生会话终端输入');
+    terminal.textarea?.setAttribute('aria-label', channel === 'shell' ? 'Shell 终端输入' : '原生会话终端输入');
     terminalRef.current = terminal;
     fitRef.current = fit;
     function resize() {
@@ -67,7 +72,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(containerRef.current);
     const input = terminal.onData((data) => {
-      if (!running || uploadingRef.current || socket?.readyState !== WebSocket.OPEN) return;
+      if (!acceptsInput || uploadingRef.current || socket?.readyState !== WebSocket.OPEN) return;
       for (let offset = 0; offset < data.length;) {
         let end = Math.min(offset + 4096, data.length);
         if (end < data.length && data.charCodeAt(end - 1) >= 0xd800 && data.charCodeAt(end - 1) <= 0xdbff) end--;
@@ -86,14 +91,15 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
       try {
         const token = await getToken(true);
         if (disposed) return;
-        socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/terminal/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`);
+        const path = channel === 'shell' ? `/api/shells/${encodeURIComponent(sessionId)}/terminal` : `/api/terminal/${encodeURIComponent(sessionId)}`;
+        socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}?token=${encodeURIComponent(token)}`);
         socket.onopen = () => {
           if (disposed) { socket?.close(); return; }
           if (everConnected) terminal.reset();
           everConnected = true;
           attempts = 0;
           terminal.options.disableStdin = !running;
-          setConnected(true); setError(''); resize(); terminal.focus();
+          setConnected(true); setError(''); resize();
         };
         socket.onmessage = (event) => {
           if (disposed) return;
@@ -103,17 +109,27 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
             if (message.type === 'ready') {
               terminalIdRef.current = typeof message.terminalId === 'string' ? message.terminalId : null;
               setTerminalId(terminalIdRef.current);
+              if (channel === 'shell' && typeof message.running === 'boolean') {
+                acceptsInput = message.running;
+                terminal.options.disableStdin = !acceptsInput;
+                if (!acceptsInput) exitRef.current?.(message.exitCode ?? 0);
+              }
             }
             if (message.type === 'error') setError(message.message || message.error || '终端连接遇到问题');
-            if (message.type === 'exit') terminal.write(`\r\n\x1b[90m[进程已退出 · ${message.exitCode ?? 0}]\x1b[0m\r\n`);
+            if (message.type === 'exit') {
+              acceptsInput = false; terminal.options.disableStdin = true;
+              terminal.write(`\r\n\x1b[90m[进程已退出 · ${message.exitCode ?? 0}]\x1b[0m\r\n`);
+              exitRef.current?.(message.exitCode ?? 0);
+            }
           } catch { setError('无法读取终端消息'); }
         };
-        socket.onclose = () => {
+        socket.onclose = (event) => {
           if (disposed) return;
           terminal.options.disableStdin = true;
           terminalIdRef.current = null; setTerminalId(null);
           if (uploadingRef.current) setImageStatus('终端连接中断，图片可能已经填入；请先检查输入中的 [Image #1] 再决定是否重试');
           setConnected(false);
+          if (channel === 'shell' && event.code === 1000) { setError('Shell 已关闭'); return; }
           if (everConnected) setError('终端连接已中断，正在自动重连；连接恢复后可继续输入');
           scheduleReconnect();
         };
@@ -127,8 +143,20 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
       disposed = true; clearTimeout(reconnect); clearTimeout(copiedTimer.current); uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; socket?.close(); input.dispose(); selection.dispose();
       resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
     };
-  }, [sessionId, running]);
-  useEffect(() => { requestAnimationFrame(() => terminalRef.current?.focus()); }, [fullscreen]);
+  }, [sessionId, running, channel]);
+  useEffect(() => {
+    // Focus follows an explicit activation, never a socket reconnect. Only the
+    // requested split pane receives focus when several terminals mount together.
+    if (channel === 'shell' && focusRequest === undefined) return;
+    const frame = requestAnimationFrame(() => terminalRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [sessionId, channel, focusRequest]);
+  useEffect(() => {
+    if (previousFullscreenRef.current === fullscreen) return;
+    previousFullscreenRef.current = fullscreen;
+    const frame = requestAnimationFrame(() => terminalRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [fullscreen]);
 
   async function stageImage(file: File) {
     if (!allowImages) return;
@@ -166,6 +194,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
     }
   }
   function onPasteCapture(event: ClipboardEvent<HTMLDivElement>) {
+    if (!allowImages) return;
     const image = Array.from(event.clipboardData.items).map(item => item.kind === 'file' ? item.getAsFile() : null).find((item): item is File => !!item && item.type.startsWith('image/'));
     if (!image) return;
     event.preventDefault(); event.stopPropagation(); void stageImage(image);
@@ -192,6 +221,6 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
     {imageStatus && <div className="terminal-image-status" role="status" aria-live="polite"><ImagePlus size={14} /><span>{imageStatus}</span>{uploadingImage && <LoaderCircle className="spin" size={13} />}</div>}
     {error && <div className="terminal-error" role="alert"><WifiOff size={14} /><span>{error}</span><button className="terminal-dismiss" aria-label="关闭终端提示" onClick={() => setError('')}><X size={13} /></button></div>}
     <div ref={containerRef} className="terminal-container" />
-    {!running && <div className="terminal-hint">启动会话后，在这里使用原生 CLI。</div>}
+    {!running && <div className="terminal-hint">{channel === 'shell' ? 'Shell 已退出，可以关闭此终端或新建一个。' : '启动会话后，在这里使用原生 CLI。'}</div>}
   </div>;
 }

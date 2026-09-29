@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Store } from './store.ts';
 import { Terminals, type LaunchCommand } from './terminal.ts';
+import { ShellTerminals } from './shell-terminals.ts';
 import { allowedRequest, validToken } from './security.ts';
 import { demoBackends, seedDemo, demoCommand } from './demo.ts';
 import { getBackendInfo, buildLaunch, discoverSessions, resolveNativeSessionId, validateNativeId, findExecutable } from './adapters.ts';
@@ -21,6 +22,7 @@ import { DeliveryNotAcceptedError, sendDelivery } from './delivery.ts';
 import { StatePublisher } from './state.ts';
 import { listDirectories, normalizeDirectoryInput } from './directories.ts';
 import { ConversationReader, conversationPreview } from './conversation.ts';
+import { gitDiff, gitStatus, listWorkspace, readWorkspaceFile } from './workspace.ts';
 import { registerCodexChat } from './chat-api.ts';
 import { MAX_TERMINAL_IMAGE_BYTES, TERMINAL_IMAGE_TYPES, type TerminalImageType } from '../shared/terminal-images.ts';
 import type { Backend, BackendInfo, Session, AppState, SessionStatus, ConversationTranscript } from '../shared/types.ts';
@@ -42,6 +44,7 @@ mkdirSync(terminalImageDir, { recursive: true, mode: 0o700 });
 const token = randomBytes(32).toString('hex');
 const instanceId = randomUUID();
 const terminals = new Terminals();
+const shells = new ShellTerminals();
 const nativeStatus = new NativeStatusWatcher();
 const dsh = new DshBridge({ dataDir });
 const conversations = new ConversationReader({ dshHistory: id => dsh.readHistory(id) });
@@ -80,10 +83,10 @@ function broadcast() {
     else client.write(chunk);
   }
 }
-function terminalEvent(id: string, event: unknown) {
+function terminalEvent(id: string, event: unknown, channel: 'sessionId' | 'shellId' = 'sessionId') {
   const message = JSON.stringify(event);
   for (const socket of wss.clients) {
-    if ((socket as WebSocket & { sessionId?: string }).sessionId !== id || socket.readyState !== WebSocket.OPEN) continue;
+    if ((socket as WebSocket & { sessionId?: string; shellId?: string })[channel] !== id || socket.readyState !== WebSocket.OPEN) continue;
     // Reconnection reconstructs the terminal snapshot; dropping a stalled viewer
     // is safer than dropping arbitrary ANSI chunks or accumulating unlimited output.
     if (socket.bufferedAmount > 2_097_152) socket.terminate();
@@ -247,6 +250,19 @@ app.use('/api', (req, res, next) => {
 
 app.get('/api/config', (_req, res) => res.json({ csrfToken: token }));
 app.get('/api/state', (_req, res) => res.json(state()));
+app.get('/api/shells', (_req, res) => res.json(shells.list()));
+app.post('/api/shells', (req, res) => {
+  if (closing) fail('终端服务正在关闭', 503);
+  const source = req.body.sessionId === undefined ? undefined : session(text(req.body.sessionId, '会话 ID'));
+  res.status(201).json(shells.create(directory(source?.cwd ?? process.cwd()), source?.id));
+});
+app.delete('/api/shells/:id', async (req, res) => {
+  const id = String(req.params.id);
+  if (!shells.get(id)) fail('终端不存在', 404);
+  await shells.remove(id);
+  for (const socket of wss.clients) if ((socket as WebSocket & { shellId?: string }).shellId === id) socket.close(1000, 'Shell removed');
+  res.json({ removed: true });
+});
 const chatApi = registerCodexChat(app, {
   store, bridge: codexBridge, conversations, instanceId, demo,
   closing: () => closing,
@@ -267,6 +283,22 @@ app.get('/api/sessions/:id/conversation', async (req, res) => {
   if (!current || current.nativeSessionId !== item.nativeSessionId || current.forkPending !== item.forkPending) return res.status(409).json({ error: '会话身份已更新，请重新读取对话' });
   updatePreview(item, transcript);
   res.json(transcript);
+});
+app.get('/api/sessions/:id/workspace/tree', async (req, res) => {
+  const item = session(String(req.params.id));
+  res.json(await listWorkspace(item.cwd, req.query.path));
+});
+app.get('/api/sessions/:id/workspace/file', async (req, res) => {
+  const item = session(String(req.params.id));
+  res.json(await readWorkspaceFile(item.cwd, req.query.path));
+});
+app.get('/api/sessions/:id/workspace/git/status', async (req, res) => {
+  const item = session(String(req.params.id));
+  res.json(await gitStatus(item.cwd));
+});
+app.get('/api/sessions/:id/workspace/git/diff', async (req, res) => {
+  const item = session(String(req.params.id));
+  res.json(await gitDiff(item.cwd, req.query.path));
 });
 app.get('/api/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -619,10 +651,32 @@ terminals.on('exit', (id: string, exitCode: number) => {
   status(id, { running: false, status: exitCode === 0 ? 'stopped' : 'error', statusSource: 'process', statusDetail: `原生进程已退出（${exitCode}）` }, '会话进程已退出');
   terminalEvent(id, { type: 'exit', exitCode });
 });
+shells.on('data', (id: string, data: string) => terminalEvent(id, { type: 'data', data }, 'shellId'));
+shells.on('exit', (id: string, exitCode: number) => terminalEvent(id, { type: 'exit', exitCode }, 'shellId'));
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
-  if (!url.pathname.startsWith('/api/terminal/')) return; // Vite owns its own HMR upgrade.
+  const shellMatch = /^\/api\/shells\/([^/]+)\/terminal$/.exec(url.pathname);
+  if (!url.pathname.startsWith('/api/terminal/') && !shellMatch) return; // Vite owns its own HMR upgrade.
   if (!allowedRequest(req, port, wildcardHost) || !validToken(url.searchParams.get('token'), token)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  if (shellMatch) {
+    const id = shellMatch[1]!;
+    const shell = shells.get(id);
+    if (!shell || closing) { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
+    wss.handleUpgrade(req, socket, head, ws => {
+      ws.on('error', () => ws.close());
+      (ws as WebSocket & { shellId: string }).shellId = id;
+      ws.send(JSON.stringify({ type: 'data', data: shells.buffer(id) }));
+      ws.send(JSON.stringify({ type: 'ready', terminalId: shells.generation(id), running: shell.running, exitCode: shell.exitCode }));
+      ws.on('message', raw => {
+        try {
+          const message = JSON.parse(raw.toString());
+          if (message.type === 'input' && typeof message.data === 'string' && message.data.length <= 32768) shells.input(id, message.data);
+          else if (message.type === 'resize') shells.resize(id, message.cols, message.rows);
+        } catch (error) { ws.send(JSON.stringify({ type: 'error', error: error instanceof Error ? error.message : '终端输入失败' })); }
+      });
+    });
+    return;
+  }
   const id = url.pathname.slice('/api/terminal/'.length);
   if (!store.session(id)) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => {
@@ -751,7 +805,7 @@ function shutdown(exitCode = 0) {
   if (nativeScheduled) clearTimeout(nativeScheduled);
   if (scheduled) clearTimeout(scheduled);
   for (const timer of identityTimers) clearTimeout(timer);
-  terminals.removeAllListeners(); nativeStatus.close();
+  terminals.removeAllListeners(); shells.removeAllListeners(); nativeStatus.close();
   for (const client of sse) client.end();
   for (const ws of wss.clients) ws.terminate();
   const httpClosed = new Promise<void>(accept => server.close(() => accept()));
@@ -760,7 +814,7 @@ function shutdown(exitCode = 0) {
   // Exiting directly in server.close used to orphan a slow native process and
   // let a replacement instance race it against the same native history.
   void (async () => {
-    const results = await Promise.allSettled([httpClosed, terminals.close(), dsh.close(), codexBridge.close()]);
+    const results = await Promise.allSettled([httpClosed, terminals.close(), shells.close(), dsh.close(), codexBridge.close()]);
     for (const result of results) if (result.status === 'rejected') { console.error('关闭原生资源失败：', result.reason instanceof Error ? result.reason.message : String(result.reason)); exitCode = 1; }
     try { publisher.close(); store.close(); }
     finally { await instanceLock.release(); }

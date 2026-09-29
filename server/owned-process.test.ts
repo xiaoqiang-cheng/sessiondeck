@@ -67,6 +67,35 @@ test('PID birth mismatch never invokes a signal callback for a replacement proce
   assert.equal(await live(child.pid!), true);
 });
 
+test('cleanup follows a PTY session change while retaining the captured birth identity', { skip: process.platform !== 'linux', timeout: 5000 }, async t => {
+  const script = `const {spawn}=require('node:child_process');
+const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});process.on('SIGHUP',()=>{});process.stdout.write('ready');setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']});
+child.stdout.once('data',()=>process.stdout.write(String(child.pid)+'\\n'));
+setInterval(()=>{},1000);`;
+  const root = spawn(process.execPath, ['-e', script], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  const exited = new Promise<void>(accept => root.once('exit', () => accept()));
+  const owner = new OwnedProcess(root.pid!, exited, signal => { root.kill(signal); });
+  let output = '', descendantPid = 0;
+  root.stdout.on('data', chunk => { output += chunk.toString(); });
+  t.after(async () => {
+    root.kill('SIGKILL');
+    if (descendantPid && await live(descendantPid)) try { process.kill(descendantPid, 'SIGKILL'); } catch { /* exited */ }
+  });
+  for (let attempt = 0; attempt < 100 && !output.includes('\n'); attempt++) await delay(10);
+  descendantPid = Number(output.trim());
+  assert.ok(descendantPid > 0);
+  assert.equal(await live(descendantPid), true);
+  const captured = owner as unknown as { original: { birth: string; session: number } };
+  const birth = captured.original.birth;
+  // node-pty can return before its forked child calls setsid. Reproduce that
+  // stale pre-setsid snapshot deterministically without depending on scheduling.
+  captured.original.session = process.pid;
+  await owner.stop('SIGHUP');
+  assert.equal(captured.original.birth, birth);
+  assert.equal(await live(root.pid!), false);
+  assert.equal(await live(descendantPid), false, 'A session change must not orphan an owned descendant');
+});
+
 test('already exited owned process cleanup does not signal any PID', async () => {
   const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
   const exited = new Promise<void>(accept => child.once('exit', () => accept()));

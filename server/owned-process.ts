@@ -22,6 +22,10 @@ function sameProcess(expected: ProcessIdentity): boolean {
  * A descendant already deliberately detached before this snapshot is not owned. */
 function descendants(root: ProcessIdentity | undefined): ProcessIdentity[] {
   if (!root || !sameProcess(root)) return [];
+  // A PTY child can call setsid after spawn returns. Its birth identity stays
+  // stable, while its session changes; use the verified session at shutdown.
+  const currentRoot = identity(root.pid);
+  if (!currentRoot || currentRoot.birth !== root.birth) return [];
   const children = new Map<number, ProcessIdentity[]>();
   try {
     for (const entry of readdirSync('/proc')) {
@@ -36,7 +40,7 @@ function descendants(root: ProcessIdentity | undefined): ProcessIdentity[] {
   const found: ProcessIdentity[] = [], visited = new Set<number>([root.pid]);
   const visit = (parent: number) => {
     for (const child of children.get(parent) ?? []) {
-      if (visited.has(child.pid) || child.session !== root.session) continue;
+      if (visited.has(child.pid) || child.session !== currentRoot.session) continue;
       visited.add(child.pid); visit(child.pid); found.push(child);
     }
   };
