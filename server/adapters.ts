@@ -56,8 +56,8 @@ export async function getBackendInfo(): Promise<BackendInfo[]> {
     }
     return {
       id, label: LABELS[id], installed: true, version,
-      capabilities: { terminal: id !== 'dsh', resume: id === 'dsh' || /\bresume\b/.test(help), fork: id === 'dsh' || (id === 'claude' ? help.includes('--fork-session') : /\bfork\b/.test(help)), discovery: true, nativeControl },
-      note: id === 'dsh' ? '复用原生 Web 界面与本地 session API；启动时验证兼容性' : id === 'codex' ? (nativeControl ? '原生 app-server 提供精确会话与状态，终端保留 Codex 自身审批' : '兼容终端模式：原生 ID 在完成一轮后确认；更新 Codex 可启用原生状态接口') : '复用原生终端，保留后端自身的登录、权限与审批',
+      capabilities: { terminal: id !== 'dsh', resume: id === 'dsh' || /\bresume\b/.test(help), fork: id === 'dsh' || (id === 'claude' ? help.includes('--fork-session') : /\bfork\b/.test(help)), discovery: true, nativeControl, graphicalChat: nativeControl },
+      note: id === 'dsh' ? '复用原生 Web 界面与本地 session API；启动时验证兼容性' : id === 'codex' ? (nativeControl ? '原生 app-server 提供图形对话、流式回复、审批和精确会话；可切换原生终端' : '兼容终端模式：原生 ID 在完成一轮后确认；更新 Codex 可启用图形对话') : '复用原生终端，保留后端自身的登录、权限与审批',
     };
   }));
 }

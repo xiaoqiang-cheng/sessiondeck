@@ -16,10 +16,11 @@ import { NativeStatusWatcher } from './native-status.ts';
 import { nativeHookPatch } from './native-events.ts';
 import { acquireInstanceLock } from './instance-lock.ts';
 import { CodexBridge } from './codex.ts';
-import { sendDelivery } from './delivery.ts';
+import { DeliveryNotAcceptedError, sendDelivery } from './delivery.ts';
 import { StatePublisher } from './state.ts';
 import { listDirectories, normalizeDirectoryInput } from './directories.ts';
 import { ConversationReader, conversationPreview } from './conversation.ts';
+import { registerCodexChat } from './chat-api.ts';
 import type { Backend, BackendInfo, Session, AppState, SessionStatus, ConversationTranscript } from '../shared/types.ts';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -175,6 +176,15 @@ app.use('/api', (req, res, next) => {
 
 app.get('/api/config', (_req, res) => res.json({ csrfToken: token }));
 app.get('/api/state', (_req, res) => res.json(state()));
+const chatApi = registerCodexChat(app, {
+  store, bridge: codexBridge, conversations, instanceId, demo,
+  closing: () => closing,
+  supported: () => !!info('codex').capabilities.nativeControl,
+  ready: item => codexRuns.get(item.id)?.nativeId === item.nativeSessionId && codexRuns.get(item.id)?.launchId === launchIds.get(item.id),
+  busy: id => starting.has(id) || stopping.has(id),
+  sessions: () => publisher.sessions(),
+  broadcast: scheduleBroadcast,
+});
 app.post('/api/directories/list', async (req, res) => {
   res.json(await listDirectories(req.body.path, { showHidden: req.body.showHidden === true }));
 });
@@ -280,8 +290,29 @@ app.post('/api/sessions/:id/fork', async (req, res) => {
 
 app.post('/api/sessions/:id/start', async (req, res) => {
   const item = session(String(req.params.id));
+  const mode = req.body?.mode ?? 'terminal';
+  if (!['terminal', 'chat'].includes(mode)) fail('未知会话交互方式');
+  if (mode === 'chat' && (demo || item.backend !== 'codex' || !info('codex').capabilities.nativeControl)) fail('这个后端目前不支持原生图形化聊天');
   if (item.archived) fail('请先恢复归档联系人');
   if (stopping.has(item.id) || terminals.isStopping(item.id)) fail('会话正在停止，请稍后再启动', 409);
+  if (item.running && mode === 'terminal' && !demo && item.backend === 'codex' && codexRuns.has(item.id) && !terminals.has(item.id)) {
+    if (starting.has(item.id)) fail('原生终端正在连接，请稍后重试', 409);
+    starting.add(item.id);
+    try {
+      const executable = await findExecutable('codex');
+      if (!executable) fail('未找到 Codex 原生命令');
+      terminals.start(item, codexBridge.remoteLaunch(item.nativeSessionId!, executable, item.cwd));
+      status(item.id, { interactionMode: 'terminal' });
+      broadcast(); return res.json(session(item.id));
+    } finally { starting.delete(item.id); }
+  }
+  if (item.running && !demo && item.backend === 'codex' && codexRuns.has(item.id)) {
+    if (starting.has(item.id)) fail('会话正在连接，请稍后重试', 409);
+    // Switching the preferred interface must also update group routing. An
+    // already attached terminal can stay connected to the same native thread.
+    if (item.interactionMode !== mode) { status(item.id, { interactionMode: mode }); broadcast(); }
+    return res.json(session(item.id));
+  }
   if (item.running || starting.has(item.id)) return res.json(item);
   if (!info(item.backend).installed) fail(`${info(item.backend).label} 尚未安装或不可用`);
   directory(item.cwd);
@@ -309,10 +340,9 @@ app.post('/api/sessions/:id/start', async (req, res) => {
         // Persist native identity even if the subsequent PTY fails. Retrying
         // this card must resume the created thread instead of making another.
         status(item.id, { nativeSessionId: native.nativeSessionId, forkPending: false });
-        const command = bridge.remoteLaunch(native.nativeSessionId, executable, item.cwd);
         codexRuns.set(item.id, { nativeId: native.nativeSessionId, launchId });
-        status(item.id, { running: true, status: 'unknown', statusSource: 'process', statusDetail: '正在连接 Codex 原生终端', lastActivity: new Date().toISOString() });
-        terminals.start(session(item.id), command);
+        status(item.id, { running: true, interactionMode: mode, status: 'unknown', statusSource: 'process', statusDetail: mode === 'chat' ? '正在连接 Codex 图形化会话' : '正在连接 Codex 原生终端', lastActivity: new Date().toISOString() });
+        if (mode === 'terminal') terminals.start(session(item.id), bridge.remoteLaunch(native.nativeSessionId, executable, item.cwd));
         await bridge.getStatus(native.nativeSessionId);
     } else {
       const command: LaunchCommand = demo ? demoCommand() : await buildLaunch(item);
@@ -362,6 +392,7 @@ app.post('/api/sessions/:id/stop', async (req, res) => {
       await codexBridge.stopSession(item.nativeSessionId);
       await terminals.stop(item.id);
       codexBridge.releaseSession(item.nativeSessionId);
+      codexRuns.delete(item.id); launchIds.delete(item.id); expectedNativeIds.delete(item.id);
       status(item.id, { running: false, status: 'stopped', statusSource: 'native', statusDetail: '已停止 Codex 当前任务，可重新进入会话' });
     } else {
       await terminals.stop(item.id);
@@ -418,12 +449,21 @@ app.post('/api/deliveries/:id/send', async (req, res) => {
   if (stopping.has(target.id) || terminals.isStopping(target.id)) fail('目标会话正在停止');
   if (target.status === 'waiting_approval') fail('请先在原生会话中处理当前审批，再填入任务');
   if (target.backend === 'dsh' && !demo && !target.nativeSessionId) fail('原生会话尚未准备好');
-  if ((target.backend !== 'dsh' || demo) && !terminals.has(target.id)) fail('会话尚未启动或已经退出');
+  const codexChat = !demo && target.backend === 'codex' && target.interactionMode === 'chat' && codexRuns.has(target.id);
+  if ((target.backend !== 'dsh' || demo) && !codexChat && !terminals.has(target.id)) fail('会话尚未启动或已经退出');
   deliveryLocks.add(id);
   try {
-    const deliveryStatus = target.backend === 'dsh' && !demo ? 'sent' : 'staged';
-    const pending = sendDelivery(store, id, deliveryStatus, () => deliveryStatus === 'sent'
-      ? dsh.prompt(target.nativeSessionId!, delivery.text) : terminals.stage(target.id, delivery.text));
+    const deliveryStatus = (target.backend === 'dsh' && !demo) || codexChat ? 'sent' : 'staged';
+    const pending = sendDelivery(store, id, deliveryStatus, async () => {
+      if (codexChat) {
+        try { await codexBridge.sendPrompt(target.nativeSessionId!, delivery.text); }
+        catch (error) {
+          if ((error as { deliveryUnknown?: boolean }).deliveryUnknown === false) throw new DeliveryNotAcceptedError(error instanceof Error ? error.message : 'Codex 未接收任务');
+          throw error;
+        }
+      } else if (deliveryStatus === 'sent') await dsh.prompt(target.nativeSessionId!, delivery.text);
+      else terminals.stage(target.id, delivery.text);
+    });
     broadcast();
     const updated = await pending;
     store.activity(target.id, 'delivery', deliveryStatus === 'staged' ? '群组消息已填入终端，等待你按回车发送' : '群组消息已发送到原生会话');
@@ -633,6 +673,7 @@ function shutdown(exitCode = 0) {
   if (closing) return; closing = true;
   clearInterval(nativePoll);
   clearInterval(previewPoll);
+  chatApi.close();
   if (nativeScheduled) clearTimeout(nativeScheduled);
   if (scheduled) clearTimeout(scheduled);
   for (const timer of identityTimers) clearTimeout(timer);

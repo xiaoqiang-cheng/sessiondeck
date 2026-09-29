@@ -11,6 +11,8 @@ import type { SessionStatus } from '../shared/types.js';
 import { validateNativeId } from './adapters.js';
 import { OwnedProcess } from './owned-process.ts';
 import { sameDirectory } from './paths.ts';
+import type { CodexChatAnswer, CodexChatSnapshot } from '../shared/chat.ts';
+import { CodexChatState, nativeChatAnswer, nativeChatRequest, type NativeChatRequest } from './codex-chat.ts';
 
 export interface CodexNativeSession {
   nativeSessionId: string;
@@ -68,7 +70,7 @@ type Thread = {
   forkedFromId?: string | null;
   canAcceptDirectInput?: boolean | null;
   name?: string | null;
-  turns?: { id: string; status?: string }[];
+  turns?: { id: string; status?: string; items?: unknown[]; itemsView?: string }[];
 };
 
 type RpcConnection = {
@@ -136,6 +138,10 @@ export class CodexBridge {
   private completed = new Map<string, CodexStatusEvent>();
   private nativeAttention = new Map<string, CodexStatusEvent>();
   private listeners = new Set<StatusListener>();
+  private chat = new CodexChatState();
+  private chatRequests = new Map<string, { threadId: string; connection: RpcConnection; request: NativeChatRequest }>();
+  private answeredChatRequests = new WeakMap<RpcConnection, Set<number | string>>();
+  private sendingPrompts = new Set<string>();
 
   constructor(options: CodexBridgeOptions = {}) {
     this.options = options;
@@ -152,6 +158,87 @@ export class CodexBridge {
   onStatus(listener: StatusListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  onChat(listener: (threadId: string, snapshot: CodexChatSnapshot) => void): () => void { return this.chat.onChange(listener); }
+  chatSnapshot(id: string): CodexChatSnapshot | undefined { return this.chat.get(id); }
+
+  /** A read can use an existing observer but never resumes or starts an Agent. */
+  async readChat(id: string): Promise<CodexChatSnapshot> {
+    validateNativeId('codex', id);
+    if (!this.ready) throw new Error('请先打开 Codex 图形会话');
+    const generation = this.bootGeneration;
+    await this.observing.get(id)?.promise;
+    if (!this.ready || generation !== this.bootGeneration) throw new Error('Codex 图形会话已停止，请重新打开');
+    const observer = this.observers.get(id);
+    const connection = observer ?? await this.connect(false);
+    const basis = this.chat.get(id)?.revision ?? 0;
+    try {
+      const response = await this.call(connection, 'thread/read', { threadId: id, includeTurns: true });
+      if (response.error) throw this.rpcError(response, 'Codex 对话读取失败');
+      if (connection.closed || connection.generation !== this.bootGeneration) throw new Error('Codex 对话读取连接已失效');
+      const retained = this.observers.get(id);
+      return this.chat.reconcile(id, (response.result as { thread?: Thread } | undefined)?.thread, basis, !!retained && !retained.closed);
+    } finally { if (!observer) { this.closeConnection(connection); this.connections.delete(connection); } }
+  }
+
+  /** The retained connection must own this request so approvals and questions
+   * remain answerable after turn/start returns. No native policy is overridden. */
+  async sendPrompt(id: string, text: string): Promise<{ turnId: string }> {
+    const rejected = (message: string): Error => Object.assign(new Error(message), { deliveryUnknown: false });
+    try { validateNativeId('codex', id); } catch { throw rejected('无效的原生会话 ID'); }
+    if (typeof text !== 'string' || !text.trim() || text.length > 32_000 || text.includes('\0')) throw rejected('消息不能为空且最多 32000 字符');
+    const connection = this.observers.get(id);
+    if (!this.ready || !connection || connection.closed || connection.ws.readyState !== WebSocket.OPEN) throw rejected('Codex 会话尚未连接，请先打开图形会话');
+    const snapshot = this.chat.get(id);
+    if (!snapshot?.connected) throw rejected('Codex 会话仍在连接，请等待原生恢复完成');
+    if (this.sendingPrompts.has(id) || snapshot?.activeTurnId || snapshot?.requests.length) throw rejected('Codex 仍在执行或等待答复，请处理当前任务后再发送');
+    this.sendingPrompts.add(id);
+    const basis = snapshot?.revision ?? 0;
+    try {
+      let response: RpcMessage;
+      try { response = await this.call(connection, 'turn/start', { threadId: id, input: [{ type: 'text', text, text_elements: [] }] }); }
+      catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { deliveryUnknown: true }); }
+      if (response.error) throw Object.assign(this.rpcError(response, 'Codex 未接受消息'), { deliveryUnknown: false });
+      const turn = (response.result as { turn?: { id?: string } } | undefined)?.turn;
+      if (!turn?.id || !UUID.test(turn.id)) throw Object.assign(new Error('Codex 未返回有效轮次 ID，请先确认是否已接收消息'), { deliveryUnknown: true });
+      this.chat.acceptedTurn(id, turn, basis);
+      const active = this.chat.get(id)?.activeTurnId;
+      if (active) this.turnIds.set(id, active);
+      return { turnId: turn.id };
+    } finally { this.sendingPrompts.delete(id); }
+  }
+
+  async answerChatRequest(id: string, requestId: string, answer: CodexChatAnswer): Promise<void> {
+    validateNativeId('codex', id);
+    const entry = this.chatRequests.get(requestId);
+    if (!entry || entry.threadId !== id || this.observers.get(id) !== entry.connection || entry.connection.closed || entry.connection.generation !== this.bootGeneration || !this.ready) throw new Error('此原生请求已失效或已由另一窗口处理，请刷新会话');
+    const result = nativeChatAnswer(entry.request, answer);
+    // Claim synchronously before yielding. A second tab must never respond to
+    // the same native request, even while the first socket write is pending.
+    this.chatRequests.delete(requestId);
+    let answered = this.answeredChatRequests.get(entry.connection);
+    if (!answered) { answered = new Set(); this.answeredChatRequests.set(entry.connection, answered); }
+    answered.add(entry.request.nativeId);
+    // A peer that omits resolution notifications must not grow this set forever.
+    if (answered.size > 256) answered.delete(answered.values().next().value!);
+    this.publishChatRequests(id);
+    await new Promise<void>((accept, reject) => {
+      entry.connection.ws.send(JSON.stringify({ jsonrpc: '2.0', id: entry.request.nativeId, result }), error => {
+        if (error) { this.chat.notice(id, '答复连接中断，接收结果尚未确认；请检查原生会话。'); reject(error); }
+        else accept();
+      });
+    });
+  }
+
+  private publishChatRequests(id: string): void {
+    this.chat.requests(id, [...this.chatRequests.values()].filter(entry => entry.threadId === id).map(entry => entry.request.view));
+  }
+
+  private clearChatRequests(connection: RpcConnection, threadId?: string, turnId?: string): void {
+    const changed = new Set<string>();
+    for (const [key, entry] of this.chatRequests) if (entry.connection === connection && (!threadId || entry.threadId === threadId) && (!turnId || entry.request.turnId === turnId)) { this.chatRequests.delete(key); changed.add(entry.threadId); }
+    for (const id of changed) this.publishChatRequests(id);
   }
 
   async start(): Promise<void> {
@@ -295,6 +382,7 @@ export class CodexBridge {
     const connection = this.observers.get(threadId);
     if (connection) this.closeConnection(connection);
     this.observers.delete(threadId);
+    this.chat.connected(threadId, false, detail);
     // A dropped observer does not end the native turn or acknowledge its
     // result. Keep that identity until resume reconciles it with native state.
     // Do not emit during an intentional stop. During a boot/process failure the
@@ -303,6 +391,9 @@ export class CodexBridge {
   }
 
   private closeConnection(connection: RpcConnection): void {
+    this.clearChatRequests(connection);
+    this.answeredChatRequests.delete(connection);
+    for (const [id, observer] of this.observers) if (observer === connection) this.chat.connected(id, false, 'Codex 原生连接已断开，请重新连接。');
     if (connection.closed) return;
     connection.closed = true;
     for (const pending of connection.pending.values()) {
@@ -313,12 +404,13 @@ export class CodexBridge {
     connection.ws.terminate();
   }
 
-  private async connect(): Promise<RpcConnection> {
-    await this.start();
+  private async connect(allowStart = true): Promise<RpcConnection> {
+    if (allowStart) await this.start();
+    else if (!this.ready) throw new Error('Codex app-server 尚未启动');
     const endpoint = this.endpoint;
     const token = this.token;
     if (!endpoint || !token) throw new Error('Codex app-server 尚未就绪');
-    const ws = new WebSocket(endpoint, { headers: { Authorization: `Bearer ${token}` } });
+    const ws = new WebSocket(endpoint, { headers: { Authorization: `Bearer ${token}` }, maxPayload: 16 * 1024 * 1024 });
     const pending = new Map<number, { resolve: (value: RpcMessage) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
     const generation = this.bootGeneration;
     const connection: RpcConnection = { ws, generation, nextId: 1, pending, initialized: Promise.resolve(), closed: false };
@@ -327,6 +419,8 @@ export class CodexBridge {
       let message: RpcMessage;
       try { message = JSON.parse(data.toString()) as RpcMessage; } catch { return; }
       if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+      if (message.method !== undefined && typeof message.method !== 'string') return;
+      if (message.params !== undefined && (!message.params || typeof message.params !== 'object' || Array.isArray(message.params))) return;
       if (connection.closed || connection.generation !== this.bootGeneration || !this.ready) return;
       if (message.method && message.id !== undefined) {
         this.handleServerRequest(connection, message);
@@ -404,19 +498,26 @@ export class CodexBridge {
   }
 
   private handleServerRequest(connection: RpcConnection, message: RpcMessage): void {
-    // Approval, user-input and other server requests belong to the native TUI
-    // connection. SessionDeck never auto-approves or fabricates an answer.
     const params = message.params ?? {};
-    const threadId = typeof params.threadId === 'string' ? params.threadId : undefined;
+    const threadId = typeof params.threadId === 'string' ? params.threadId : typeof params.conversationId === 'string' ? params.conversationId : undefined;
     if (!threadId || this.observers.get(threadId) !== connection) return;
+    if (message.id !== undefined && (typeof message.id === 'string' || typeof message.id === 'number')) {
+      const duplicate = this.answeredChatRequests.get(connection)?.has(message.id) || [...this.chatRequests.values()].some(entry => entry.connection === connection && entry.threadId === threadId && entry.request.nativeId === message.id);
+      const count = [...this.chatRequests.values()].filter(entry => entry.threadId === threadId).length;
+      if (!duplicate && count < 32) {
+        const request = nativeChatRequest(message.method!, message.id, params);
+        this.chatRequests.set(request.view.id, { threadId, connection, request });
+        this.publishChatRequests(threadId);
+      } else if (count >= 32) this.chat.notice(threadId, '原生待处理请求过多，请切换原生终端或停止当前任务。');
+    }
     const item = params.item as { id?: unknown } | undefined;
     const itemId = typeof params.itemId === 'string' ? params.itemId : typeof item?.id === 'string' ? item.id : undefined;
     let event: CodexStatusEvent | undefined;
     if (/approval|permission/i.test(message.method ?? '')) event = { status: 'waiting_approval', detail: 'Codex 正在等待原生会话处理审批', timestamp: now(), ...(itemId ? { attentionKey: `codex:${threadId}:approval:${itemId}` } : {}) };
     else if (/elicitation|user.?input/i.test(message.method ?? '')) event = { status: 'waiting_input', detail: 'Codex 正在等待原生会话处理输入', timestamp: now(), ...(itemId ? { attentionKey: `codex:${threadId}:input:${itemId}` } : {}) };
     if (event) { this.nativeAttention.set(threadId, event); this.emitStatus(threadId, event); }
-    // Intentionally leave the request unanswered here. It can be broadcast to
-    // both clients; sending even an error would race the user's TUI response.
+    // A native request may also reach the TUI. Only an explicit user answer
+    // writes a response; serverRequest/resolved removes another client's win.
   }
 
   private handleNotification(connection: RpcConnection, message: RpcMessage): void {
@@ -424,6 +525,13 @@ export class CodexBridge {
     const params = message.params ?? {};
     const threadId = typeof params.threadId === 'string' ? params.threadId : undefined;
     if (!threadId || !UUID.test(threadId) || this.observers.get(threadId) !== connection) return;
+    if (message.method === 'serverRequest/resolved') {
+      if (typeof params.requestId === 'string' || typeof params.requestId === 'number') this.answeredChatRequests.get(connection)?.delete(params.requestId);
+      for (const [id, entry] of this.chatRequests) if (entry.connection === connection && entry.threadId === threadId && entry.request.nativeId === params.requestId) this.chatRequests.delete(id);
+      this.publishChatRequests(threadId);
+      return;
+    }
+    this.chat.event(threadId, message.method!, params);
     if (message.method === 'thread/status/changed' && threadId) {
       const status = params.status as { type?: string; activeFlags?: string[] } | undefined;
       if (status?.type === 'active') this.completed.delete(threadId);
@@ -441,6 +549,7 @@ export class CodexBridge {
       if (!turn?.id || !UUID.test(turn.id)) return;
       const activeId = this.turnIds.get(threadId);
       if (activeId && activeId !== turn.id) return;
+      this.clearChatRequests(connection, threadId, turn.id);
       this.turnIds.delete(threadId);
       const event = this.completionEvent(threadId, turn as { id: string; status?: string });
       this.emitStatus(threadId, event);
@@ -503,10 +612,10 @@ export class CodexBridge {
   }
 
   private async observe(threadId: string): Promise<void> {
-    if (this.observers.has(threadId)) return;
     const version = this.observationVersions.get(threadId) ?? 0;
     const pending = this.observing.get(threadId);
     if (pending?.version === version) return pending.promise;
+    if (this.observers.has(threadId)) return;
     const attempt: ObservationAttempt = { version, promise: Promise.resolve() };
     const assertActive = () => {
       if ((this.observationVersions.get(threadId) ?? 0) !== version || (attempt.connection && (attempt.connection.closed || attempt.connection.generation !== this.bootGeneration))) throw new Error('Codex 状态恢复已取消');
@@ -516,6 +625,10 @@ export class CodexBridge {
       attempt.connection = connection;
       try {
         assertActive();
+        const basis = this.chat.get(threadId)?.revision ?? 0;
+        // Register before resume: a pending approval can be replayed before the
+        // resume response, and must stay bound to this retained connection.
+        this.retainObserver(threadId, connection);
         // Include the native turns once on (re)connection. A completion can
         // occur while our observer is offline, without the TUI disconnecting.
         const response = await this.call(connection, 'thread/resume', { threadId, excludeTurns: false });
@@ -523,11 +636,13 @@ export class CodexBridge {
         if (response.error) throw this.rpcError(response, 'Codex 会话恢复失败');
         const thread = (response.result as { thread?: Thread } | undefined)?.thread;
         if (thread?.id !== threadId) throw new Error('Codex 返回了不匹配的恢复会话');
-        this.retainObserver(threadId, connection);
-        this.emitStatus(threadId, this.restoreNativeState(thread));
+        const newerTurn = this.chat.turnChanged(threadId, basis);
+        this.chat.reconcile(threadId, thread, basis, true);
+        if (!newerTurn) this.emitStatus(threadId, this.restoreNativeState(thread));
       } catch (error) {
         this.closeConnection(connection);
         this.connections.delete(connection);
+        if (this.observers.get(threadId) === connection) this.observers.delete(threadId);
         throw error;
       }
     })().finally(() => { if (this.observing.get(threadId) === attempt) this.observing.delete(threadId); });
@@ -552,6 +667,7 @@ export class CodexBridge {
       const thread = (response.result as { thread?: Thread } | undefined)?.thread;
       if (!thread?.id || !UUID.test(thread.id)) throw new Error('Codex 未返回有效的原生会话 ID');
       this.retainObserver(thread.id, connection);
+      this.chat.reconcile(thread.id, thread, this.chat.get(thread.id)?.revision ?? 0, true);
       if (title?.trim()) {
         // The native identity already exists. A transient title write failure
         // must not make the caller create a duplicate contact.
@@ -593,6 +709,7 @@ export class CodexBridge {
       if (!child?.id || !UUID.test(child.id) || child.id === id || child.forkedFromId !== id) throw new Error('Codex 未创建独立 Fork 会话');
       if (targetCwd && child.cwd && !await sameDirectory(child.cwd, targetCwd)) throw new Error('Codex Fork 未使用请求的工作目录');
       this.retainObserver(child.id, connection);
+      this.chat.reconcile(child.id, child, this.chat.get(child.id)?.revision ?? 0, true);
       if (child.status) this.emitStatus(child.id, this.mapStatus(child.status, 'Codex Fork 会话已连接'));
       return { nativeSessionId: child.id, remoteUrl: this.endpoint };
     } catch (error) {
@@ -640,6 +757,8 @@ export class CodexBridge {
       }
       const response = await this.call(connection, 'turn/interrupt', { threadId: id, turnId });
       if (response.error && !/no active turn/i.test(response.error.message ?? '')) throw this.rpcError(response, 'Codex 任务停止失败');
+      this.clearChatRequests(connection, id);
+      this.chat.event(id, 'turn/completed', { turn: { id: turnId, status: 'interrupted' } });
       this.turnIds.delete(id);
       this.completed.delete(id);
       this.nativeAttention.delete(id);
@@ -671,7 +790,7 @@ export class CodexBridge {
       // Recover that subscription on the next status poll, without restarting
       // the app-server or losing the native TUI's execution/approval ownership.
       if (!this.ready) return { status: 'unknown', detail: 'Codex 原生服务已断开，请重新进入会话', timestamp: now() };
-      if (!this.observers.has(id)) await this.observe(id);
+      if (!this.observers.has(id) || this.observing.has(id)) await this.observe(id);
       if ((this.observationVersions.get(id) ?? 0) !== version) return { status: 'unknown', detail: 'Codex 原生状态观察已释放', timestamp: now() };
       const observer = this.observers.get(id);
       if (!observer) return { status: 'unknown', detail: 'Codex 原生状态连接已断开', timestamp: now() };

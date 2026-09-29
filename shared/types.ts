@@ -7,7 +7,7 @@ export interface BackendInfo {
   label: string;
   installed: boolean;
   version: string | null;
-  capabilities: { terminal: boolean; resume: boolean; fork: boolean; discovery: boolean; nativeControl?: boolean };
+  capabilities: { terminal: boolean; resume: boolean; fork: boolean; discovery: boolean; nativeControl?: boolean; graphicalChat?: boolean };
   note?: string;
 }
 
@@ -36,6 +36,8 @@ export interface Session {
   /** Stable native attention identity prevents replayed events from reminding twice. */
   lastAttentionKey?: string | null;
   running: boolean;
+  /** Codex can run without a PTY; terminal attachment keeps the same native thread. */
+  interactionMode?: 'chat' | 'terminal';
   origin: 'created' | 'imported' | 'forked';
 }
 

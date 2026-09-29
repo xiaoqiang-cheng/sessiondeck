@@ -1,0 +1,20 @@
+.chat-markdown { font-size: 13.5px; line-height: 1.8; overflow-wrap: anywhere; }
+.chat-markdown>:first-child { margin-top: 0; }
+.chat-markdown>:last-child { margin-bottom: 0; }
+.chat-markdown p { margin: 0 0 12px; white-space: pre-wrap; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3, .chat-markdown h4 { margin: 18px 0 8px; line-height: 1.45; }
+.chat-markdown h1 { font-size: 21px; }.chat-markdown h2 { font-size: 18px; }.chat-markdown h3 { font-size: 16px; }.chat-markdown h4 { font-size: 14px; }
+.chat-markdown ul, .chat-markdown ol { margin: 8px 0 14px; padding-left: 24px; }
+.chat-markdown li { margin: 3px 0; }.chat-markdown li>p { margin-bottom: 5px; }
+.chat-markdown a { color: var(--accent-dark); text-decoration: underline; text-underline-offset: 2px; }
+.chat-markdown blockquote { margin: 12px 0; padding: 3px 12px; border-left: 3px solid var(--line-strong); color: var(--muted); }
+.chat-markdown hr { margin: 18px 0; border: 0; border-top: 1px solid var(--line-strong); }
+.chat-markdown :not(pre)>code { padding: 2px 5px; border-radius: 4px; background: #e8ebf0; color: #344154; }
+.markdown-code { position: relative; max-width: 100%; margin: 12px 0; border: 1px solid var(--line-strong); border-radius: 9px; background: #f6f8fa; overflow: hidden; }
+.markdown-code>button { display: flex; align-items: center; gap: 5px; position: absolute; top: 6px; right: 7px; z-index: 1; padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: #51545b; font-size: 11px; }
+.markdown-code pre { margin: 0; padding: 35px 13px 13px; overflow-x: auto; font-size: 12px; line-height: 1.65; white-space: pre; }
+.markdown-code pre code.hljs { padding: 0; background: transparent; }
+.markdown-table { overflow-x: auto; margin: 12px 0; }.markdown-table table { border-collapse: collapse; min-width: 180px; }
+.markdown-table th, .markdown-table td { padding: 6px 10px; border: 1px solid var(--line-strong); text-align: left; }
+.markdown-table th { background: var(--subtle); font-weight: 600; }.markdown-image-label { color: var(--muted); font-size: 12px; }
+.chat-markdown .contains-task-list { list-style: none; padding-left: 6px; }.chat-markdown .task-list-item input { margin-right: 7px; }

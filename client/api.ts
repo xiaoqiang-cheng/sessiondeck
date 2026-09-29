@@ -1,5 +1,9 @@
 let tokenPromise: Promise<string> | undefined;
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) { super(message); this.name = 'ApiError'; }
+}
+
 async function request(url: string, options?: RequestInit, timeoutMs = 30_000) {
   try {
     return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
@@ -40,6 +44,6 @@ export async function api<T>(path: string, body?: unknown, method?: string): Pro
   const result = await response.json().catch(() => {
     throw new Error(response.ok ? '服务返回了无法读取的数据，请刷新后重试' : `本地服务暂时无法处理请求 (${response.status})`);
   });
-  if (!response.ok) throw new Error(result.error || `请求失败 (${response.status})`);
+  if (!response.ok) throw new ApiError(result.error || `请求失败 (${response.status})`, response.status, result.code);
   return result as T;
 }
