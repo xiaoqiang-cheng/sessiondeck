@@ -47,3 +47,34 @@ export async function api<T>(path: string, body?: unknown, method?: string): Pro
   if (!response.ok) throw new ApiError(result.error || `请求失败 (${response.status})`, response.status, result.code);
   return result as T;
 }
+
+/** Upload a browser image to the native Codex terminal without JSON encoding. */
+export async function uploadTerminalImage(sessionId: string, terminalId: string, image: Blob, signal?: AbortSignal): Promise<{ staged: true }> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 60_000);
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const send = async (token: string) => fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/image`, {
+    method: 'POST',
+    headers: { 'Content-Type': image.type, 'X-SessionDeck-Token': token, 'X-SessionDeck-Terminal': terminalId },
+    body: image,
+    signal: controller.signal,
+  });
+  try {
+    let response = await send(await getToken());
+    if (response.status === 403) {
+      await getToken(true);
+      response = await send(await getToken());
+    }
+    const result = await response.json().catch(() => ({})) as { error?: string };
+    if (!response.ok) throw new ApiError(result.error || `图片上传失败 (${response.status})`, response.status);
+    return result as { staged: true };
+  } catch (cause) {
+    if (cause instanceof ApiError) throw cause;
+    if (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError')) throw new Error('图片上传中断，结果可能未知，请先检查原生输入后再重试');
+    throw new Error('图片上传失败，结果可能未知，请先检查原生输入后再重试');
+  } finally {
+    window.clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+  }
+}
