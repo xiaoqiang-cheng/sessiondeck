@@ -1,6 +1,7 @@
 import { mutationHeaders, test } from './fixtures';
 import { expect } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
+import type { AppState } from '../shared/types';
 
 test('contacts, native terminal, fork and directed group collaboration work in the browser', async ({ page }) => {
   const errors: string[] = [];
@@ -595,8 +596,27 @@ test('the "需要你处理" badge counts unread reminders, matching the red badg
   const attentionTab = nav.getByRole('button', { name: /^需要你处理/ });
   await expect(attentionTab.locator('b')).toHaveText('1');
   await expect(page).toHaveTitle(/^\(1\) /);
-  // Blocked sessions sort above pinned ones; pinned above the merely running.
-  await expect(page.locator('.session-card h3')).toHaveText(['等待且未读', '已看过但仍在等待', '曾提醒但已在运行']);
+  // Pinned first, then blocked sessions, then the merely running.
+  await expect(page.locator('.session-card h3')).toHaveText(['曾提醒但已在运行', '等待且未读', '已看过但仍在等待']);
   await attentionTab.click();
   await expect(page.locator('.session-card h3')).toHaveText(['等待且未读']);
+});
+
+test('opening a blocked session clears its red badge from the read response alone, without the live stream', async ({ page }) => {
+  // The snapshot says blocked and unread; the stream never delivers a patch.
+  // Only the real /read response can clear the badge.
+  let target!: AppState['sessions'][number];
+  await mockWorkspace(page, state => {
+    target = state.sessions.find(session => session.title === '梳理登录流程')!;
+    Object.assign(target, { status: 'waiting_input', unread: 1, archived: false });
+  });
+  await page.goto(`/#/groups/${target.groupId}`);
+  const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: target.title, exact: true }) });
+  await expect(card.locator('.unread-badge')).toHaveCount(1);
+  await expect(page.locator('.primary-nav b.alert')).toHaveText('1');
+  await card.getByRole('button', { name: `进入 ${target.title} 的会话`, exact: true }).click();
+  await expect(page.locator('.primary-nav b.alert')).toHaveCount(0);
+  await page.getByRole('button', { name: '关闭会话', exact: true }).click();
+  await expect(card.locator('.unread-badge')).toHaveCount(0);
+  await expect(card).not.toHaveClass(/has-unread/);
 });

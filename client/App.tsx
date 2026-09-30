@@ -87,7 +87,7 @@ function HelpDialog({ close }: { close: () => void }) {
       <h3>如何理解状态</h3>
       <ul className="status-guide"><li><span className="status-badge running">运行中</span><span>后端正在执行任务。</span></li><li><span className="status-badge waiting">等待输入 / 审批</span><span>需要你进入会话回复或决定。</span></li><li><span className="status-badge idle">空闲 / 已停止</span><span>当前没有执行任务；不代表工作已验收。</span></li><li><span className="status-badge unknown">状态未知</span><span>目前没有足够信息确认状态，进入原生会话查看。</span></li></ul>
       <p>标有“估测”的状态来自终端输出。卡片上的提醒、来源说明和原生会话可帮助你判断；断线时保留最后收到的状态。</p>
-      <h3>保留你的工作方式</h3><p>置顶联系人始终在最前；然后是等待输入、审批、出现异常或有新提醒的会话，再是正在运行的会话；其余默认按创建时间，也可改为最近活动或名称。有新提醒的卡片会轻轻跳动并发光，打开会话后消失。每个页面独立保存搜索和筛选，刷新后继续使用；Fork 继承上下文，原联系人保留。</p>
+      <h3>保留你的工作方式</h3><p>置顶联系人始终在最前；然后是等待输入、审批或出现异常的会话，再是正在运行的会话；其余默认按创建时间，也可改为最近活动或名称。有新提醒的卡片会轻轻跳动并发光，打开会话后消失。每个页面独立保存搜索和筛选，刷新后继续使用；Fork 继承上下文，原联系人保留。</p>
     </div><div className="modal-footer"><button className="button primary" onClick={close}>知道了</button></div>
   </ModalShell>;
 }
@@ -266,7 +266,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
           if (!notificationRef.current || typeof Notification === 'undefined' || Notification.permission !== 'granted') continue;
           try {
             const notification = new Notification(`${session.title} · ${STATUS[session.status].label}`, { body: session.statusDetail || '点击进入会话继续处理', tag: session.id, icon: '/favicon.svg' });
-            notification.onclick = () => { window.focus(); setSelectedId(session.id); setSelection(''); notification.close(); void api(`/sessions/${session.id}/read`, {}).catch(() => {}); };
+            notification.onclick = () => { window.focus(); setSelectedId(session.id); setSelection(''); notification.close(); };
           } catch {
             // Some mobile browsers expose Notification but reject its constructor.
             setNotifications(false); writeLocalPreference('sessiondeck.notifications', 'off');
@@ -311,19 +311,30 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   }, [view]);
   useEffect(() => { setSelection(''); setModal(null); }, [selectedId]);
   useEffect(() => { if (selectedId) setWorkspaceSessionId(selectedId); }, [selectedId]);
+  // The server answers /read with the updated session. Apply it right away so
+  // the badge clears even if the live stream is slow, reconnecting or stale.
+  const markRead = useCallback(async (id: string) => {
+    try {
+      const item = await api<Session>(`/sessions/${id}/read`, {});
+      const merge = (current: AppState | null) => current && current.sessions.some(session => session.id === id)
+        ? { ...current, sessions: current.sessions.map(session => session.id === id ? { ...session, unread: item.unread } : session) } : current;
+      stateRef.current = merge(stateRef.current); sessionsRef.current = stateRef.current?.sessions ?? null;
+      setState(merge);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '无法标记已读'); }
+  }, []);
   // Viewing a session reads its reminders, whether or not you type anything.
   // Re-run on every new reminder while it stays open and the tab is visible.
   useEffect(() => {
     if (!selected?.id || !selected.unread || document.visibilityState !== 'visible') return;
     const id = selected.id;
-    const timer = setTimeout(() => { void api(`/sessions/${id}/read`, {}).catch((cause) => setError(cause.message)); }, 600);
+    const timer = setTimeout(() => { void markRead(id); }, 300);
     return () => clearTimeout(timer);
-  }, [selected?.id, selected?.unread]);
+  }, [selected?.id, selected?.unread, markRead]);
   useEffect(() => {
-    const onVisible = () => { if (document.visibilityState === 'visible' && stateRef.current && selectedId) { const item = stateRef.current.sessions.find(session => session.id === selectedId); if (item?.unread) void api(`/sessions/${item.id}/read`, {}).catch(() => {}); } };
+    const onVisible = () => { if (document.visibilityState === 'visible' && stateRef.current && selectedId) { const item = stateRef.current.sessions.find(session => session.id === selectedId); if (item?.unread) void markRead(item.id); } };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [selectedId]);
+  }, [selectedId, markRead]);
   useEffect(() => {
     void refresh().catch(() => {});
     const stream = new EventSource('/api/events');
@@ -435,11 +446,11 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       && (statusFilter === 'all' || (statusFilter === 'attention' ? attention(session) : statusFilter === 'unread' ? session.unread > 0 : session.status === statusFilter))
       && `${session.title} ${session.cwd} ${session.lastUserInput || ''} ${BACKEND[session.backend].name}`.toLowerCase().includes(query.trim().toLowerCase());
   }).sort((a, b) => {
-    // Like a chat list: whoever is waiting on you comes first, then pinned
-    // contacts, then ones still working; the rest by the chosen order, where
-    // the default is newest first.
-    if (attention(a) !== attention(b)) return Number(attention(b)) - Number(attention(a));
+    // Like a chat list: pinned stays on top; then whoever is waiting on you;
+    // then ones still working; the rest by the chosen order, where the
+    // default is newest first.
     if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
+    if (attention(a) !== attention(b)) return Number(attention(b)) - Number(attention(a));
     if (a.running !== b.running) return Number(b.running) - Number(a.running);
     if (contactSort === 'name') return a.title.localeCompare(b.title, 'zh-CN', { numeric: true, sensitivity: 'base' });
     return contactSort === 'activity' ? new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime() : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
