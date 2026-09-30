@@ -55,7 +55,10 @@ function readOpenTabs(): string[] {
   } catch { /* Tabs are a per-tab convenience; unavailable storage starts empty. */ }
   return [];
 }
+/** The agent is blocked on a person: waiting for input or approval, or failed. */
 const attention = (s: Session) => s.status === 'waiting_input' || s.status === 'waiting_approval' || s.status === 'error';
+/** Something happened that you have not looked at yet; clears when the session is opened. */
+const unseen = (s: Session) => s.unread > 0;
 const relativeTime = (value: string) => {
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000));
   if (!Number.isFinite(minutes)) return '—';
@@ -355,7 +358,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
     return () => { clearInterval(timer); clearTimeout(toastTimer.current); };
   }, []);
   useEffect(() => {
-    const count = state?.sessions.filter((session) => !session.archived && attention(session)).length ?? 0;
+    const count = state?.sessions.filter((session) => !session.archived && unseen(session)).length ?? 0;
     document.title = `${count ? `(${count}) ` : ''}${selected?.title ?? currentGroup?.title ?? ({ contacts: '会话联系人', attention: '需要你处理', running: '正在运行', archive: '已归档', backends: '连接与能力', activity: '最近活动' } as Record<string, string>)[view] ?? '会话联系人'} · SessionDeck`;
   }, [state, selected?.title, currentGroup?.title, view, clock]);
   useEffect(() => {
@@ -418,11 +421,12 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
 
   const sessions = state?.sessions ?? [];
   const personal = sessions.filter((session) => !session.archived && !session.groupId);
-  const needsAttention = sessions.filter((session) => !session.archived && attention(session));
+  // Matches the red badge on cards, so the count drops as you read each one.
+  const needsAttention = sessions.filter((session) => !session.archived && unseen(session));
   const running = sessions.filter((session) => !session.archived && session.status === 'running');
   const archived = sessions.filter((session) => session.archived);
   const visible = sessions.filter((session) => {
-    if (groupId ? session.groupId !== groupId || session.archived : view === 'archive' ? !session.archived : view === 'attention' ? session.archived || !attention(session) : view === 'running' ? session.archived || session.status !== 'running' : session.archived || !!session.groupId) return false;
+    if (groupId ? session.groupId !== groupId || session.archived : view === 'archive' ? !session.archived : view === 'attention' ? session.archived || !unseen(session) : view === 'running' ? session.archived || session.status !== 'running' : session.archived || !!session.groupId) return false;
     return (backendFilter === 'all' || session.backend === backendFilter)
       && (statusFilter === 'all' || (statusFilter === 'attention' ? attention(session) : statusFilter === 'unread' ? session.unread > 0 : session.status === statusFilter))
       && `${session.title} ${session.cwd} ${session.lastUserInput || ''} ${BACKEND[session.backend].name}`.toLowerCase().includes(query.trim().toLowerCase());
@@ -431,8 +435,10 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
     // reminder or a task that finished), then ones still working; the rest by
     // the chosen order, where the default is newest first.
     if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
-    const needs = (s: Session) => attention(s) || s.unread > 0;
+    const needs = (s: Session) => attention(s) || unseen(s);
     if (needs(a) !== needs(b)) return Number(needs(b)) - Number(needs(a));
+    // Among those, an agent blocked on you outranks one that finished on its own.
+    if (attention(a) !== attention(b)) return Number(attention(b)) - Number(attention(a));
     if (a.running !== b.running) return Number(b.running) - Number(a.running);
     if (contactSort === 'name') return a.title.localeCompare(b.title, 'zh-CN', { numeric: true, sensitivity: 'base' });
     return contactSort === 'activity' ? new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime() : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -639,7 +645,7 @@ function FilterMenu({ active, reset, children }: { active: boolean; reset: () =>
 function EmptyState({ filtered, view, group, backendCount, connections, create, importSessions, clear }: { filtered: boolean; view: View; group: boolean; backendCount: number; connections: () => void; create: () => void; importSessions: () => void; clear: () => void }) {
   const waiting = view === 'attention'; const archive = view === 'archive'; const running = view === 'running';
   const first = !filtered && !waiting && !archive && !running && !group;
-  return <div className="empty-state">{filtered ? <Search size={26} strokeWidth={1.5} /> : waiting ? <CheckCheck size={26} strokeWidth={1.5} /> : group ? <UsersRound size={26} strokeWidth={1.5} /> : archive ? <Archive size={26} strokeWidth={1.5} /> : <MessageSquare size={26} strokeWidth={1.5} />}<h3>{filtered ? '没有找到匹配的联系人' : running ? '目前没有正在执行的任务' : waiting ? '目前没有需要你处理的事项' : archive ? '这里还没有归档会话' : group ? '群组还没有成员' : '还没有联系人'}</h3><p>{filtered ? '试试其他关键词，或调整后端与状态筛选。' : running ? '会话开始执行任务后会出现在这里。' : waiting ? '需要输入、审批或发生异常时，会话会出现在这里。' : archive ? '归档的联系人会保留在这里。' : group ? '新建会话，或将已有联系人 Fork 入群。' : backendCount ? '新建一个联系人，或导入本机已有的原生会话。' : '尚未检测到本机 Agent，可先查看后端安装情况；已有历史仍可尝试导入。'}</p><div>{filtered ? <button className="button secondary" onClick={clear}>清除筛选</button> : !waiting && !archive && !running && <><button className="button primary" onClick={create}><Plus size={15} />{group ? '添加成员' : '新建联系人'}</button>{!group && <button className="button secondary" onClick={importSessions}><ArrowDownToLine size={15} /> 导入已有会话</button>}</>}</div>{first && <button className="text-button" onClick={connections}>{backendCount ? '查看后端连接与能力' : '查看后端安装情况'}<ArrowRight size={13} /></button>}</div>;
+  return <div className="empty-state">{filtered ? <Search size={26} strokeWidth={1.5} /> : waiting ? <CheckCheck size={26} strokeWidth={1.5} /> : group ? <UsersRound size={26} strokeWidth={1.5} /> : archive ? <Archive size={26} strokeWidth={1.5} /> : <MessageSquare size={26} strokeWidth={1.5} />}<h3>{filtered ? '没有找到匹配的联系人' : running ? '目前没有正在执行的任务' : waiting ? '没有未读的提醒' : archive ? '这里还没有归档会话' : group ? '群组还没有成员' : '还没有联系人'}</h3><p>{filtered ? '试试其他关键词，或调整后端与状态筛选。' : running ? '会话开始执行任务后会出现在这里。' : waiting ? '会话等待输入、审批或出现异常时会在这里出现，打开后即视为已读。' : archive ? '归档的联系人会保留在这里。' : group ? '新建会话，或将已有联系人 Fork 入群。' : backendCount ? '新建一个联系人，或导入本机已有的原生会话。' : '尚未检测到本机 Agent，可先查看后端安装情况；已有历史仍可尝试导入。'}</p><div>{filtered ? <button className="button secondary" onClick={clear}>清除筛选</button> : !waiting && !archive && !running && <><button className="button primary" onClick={create}><Plus size={15} />{group ? '添加成员' : '新建联系人'}</button>{!group && <button className="button secondary" onClick={importSessions}><ArrowDownToLine size={15} /> 导入已有会话</button>}</>}</div>{first && <button className="text-button" onClick={connections}>{backendCount ? '查看后端连接与能力' : '查看后端安装情况'}<ArrowRight size={13} /></button>}</div>;
 }
 
 function BackendSettings({ state, refresh, onCreate }: { state: AppState; refresh: () => void; onCreate: (backend: Backend) => void }) {

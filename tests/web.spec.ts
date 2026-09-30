@@ -315,7 +315,7 @@ test('contact sorting and filters persist across reload with separate filters fo
   await expect(page.getByLabel('按状态筛选')).toHaveValue('idle');
   await expect(page.locator('.backend-tabs').getByRole('button', { name: 'Codex', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.keyboard.press('Escape');
-  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: '需要你处理', exact: true }).click();
+  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /^需要你处理/ }).click();
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('');
   await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /会话联系人/ }).click();
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('排序');
@@ -575,4 +575,25 @@ test('new group members inherit the group directory, while recent paths require 
   await page.getByRole('button', { name: '新建联系人', exact: true }).first().click();
   await expect(page.getByRole('dialog').getByLabel('工作目录', { exact: true })).toHaveValue('/default/workspace');
   await expect(page.locator('.recent-directories')).not.toBeVisible();
+});
+
+test('the "需要你处理" badge counts unread reminders, matching the red badge on cards', async ({ page }) => {
+  await mockWorkspace(page, state => {
+    const seed = state.sessions[0];
+    state.sessions = [
+      { ...seed, id: 'seen-waiting', title: '已看过但仍在等待', groupId: null, archived: false, pinned: false, status: 'waiting_input', unread: 0 },
+      { ...seed, id: 'unseen-done', title: '完成后还没看', groupId: null, archived: false, pinned: false, status: 'idle', unread: 1 },
+      { ...seed, id: 'unseen-waiting', title: '等待且未读', groupId: null, archived: false, pinned: false, status: 'waiting_approval', unread: 2 },
+      { ...seed, id: 'archived-unseen', title: '已归档的未读', groupId: null, archived: true, pinned: false, status: 'error', unread: 1 },
+    ];
+  });
+  await page.goto('/');
+  const nav = page.getByRole('navigation', { name: '工作空间导航' });
+  // Two cards carry a red badge; the nav badge shows the same two.
+  await expect(page.locator('.session-card .unread-badge')).toHaveCount(2);
+  const attentionTab = nav.getByRole('button', { name: /^需要你处理/ });
+  await expect(attentionTab.locator('b')).toHaveText('2');
+  await attentionTab.click();
+  await expect(page.locator('.session-card h3')).toHaveText(['等待且未读', '完成后还没看']);
+  await expect(page).toHaveTitle(/^\(2\) /);
 });
