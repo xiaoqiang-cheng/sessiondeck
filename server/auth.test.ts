@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { authorize, matchRoute } from './access.ts';
 import { AuthStore } from './auth.ts';
 import { allowedRemoteRequest } from './security.ts';
-import { normalizeRemote, DEFAULT_REMOTE, sshTarget } from './remote.ts';
+import { normalizeRemote, DEFAULT_REMOTE, sshTarget, caddyConfig } from './remote.ts';
 import type { AppState, Session } from '../shared/types.ts';
 import type { AuthStatus, Share } from '../shared/auth.ts';
 
@@ -57,6 +57,11 @@ test('remote requests need the configured host and a same-origin mutation', () =
   assert.throws(() => normalizeRemote({ sshHost: '-oProxyCommand=x' }, { ...DEFAULT_REMOTE, localPort: 4318 }), /格式无效/);
   assert.throws(() => normalizeRemote({ publicUrl: 'https://a.example/path' }, { ...DEFAULT_REMOTE, localPort: 4318 }), /不要包含路径/);
   assert.throws(() => normalizeRemote({ enabled: true }, { ...DEFAULT_REMOTE, localPort: 4318 }), /请先填写/);
+  // A generated site block must flush the event stream and never suggest a site-wide encode.
+  const caddy = caddyConfig({ ...DEFAULT_REMOTE, localPort: 4318, publicUrl: 'https://deck.example.com:8443' });
+  assert.match(caddy, /deck\.example\.com:8443 \{/);
+  assert.match(caddy, /flush_interval -1/);
+  assert.doesNotMatch(caddy, /^\s*encode /m);
   // The SSH target defaults to the public domain (port stripped).
   const inferred = normalizeRemote({ enabled: true, publicUrl: 'https://deck.example.com:8443', sshUser: 'ubuntu' }, { ...DEFAULT_REMOTE, localPort: 4318 });
   assert.equal(sshTarget(inferred), 'deck.example.com');

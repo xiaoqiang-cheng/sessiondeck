@@ -483,7 +483,9 @@ app.get('/api/events', (req, res) => {
   const principal = principalOf(res);
   res.write(`event: state\ndata: ${JSON.stringify(viewState(principal))}\n\n`);
   sse.set(res, { principal, device: res.locals.device });
-  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20_000);
+  // A named ping (not a comment) lets the browser notice a stalled stream,
+  // for example behind a proxy that buffers or compresses event streams.
+  const heartbeat = setInterval(() => res.write('event: ping\ndata: {}\n\n'), 20_000);
   req.on('close', () => { sse.delete(res); clearInterval(heartbeat); });
 });
 

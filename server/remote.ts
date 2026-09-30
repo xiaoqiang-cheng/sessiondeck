@@ -80,9 +80,15 @@ export function caddyConfig(settings: RemoteSettings) {
   // A non-default port (443 already taken, for example) is kept in the site
   // address; Caddy then serves TLS there and obtains the certificate over :80.
   const host = settings.publicUrl ? new URL(settings.publicUrl).host : 'deck.example.com';
+  // Live updates are a text/event-stream. A site-wide `encode` would gzip it
+  // and hold events in the compressor, so the stream stays uncompressed and
+  // the proxy flushes every chunk.
   return `# 追加到 /etc/caddy/Caddyfile（服务器上执行一次，Caddy 会自动申请证书）
+# 不要给这个站点加整站的 encode：实时推送（text/event-stream）被压缩后会一直卡在缓冲里。
 ${host} {
-\treverse_proxy 127.0.0.1:${settings.serverPort}
+\treverse_proxy 127.0.0.1:${settings.serverPort} {
+\t\tflush_interval -1
+\t}
 }`;
 }
 

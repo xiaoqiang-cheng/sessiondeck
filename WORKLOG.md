@@ -240,3 +240,11 @@
 - 新增回归：快照标记为阻塞未读、推送流永不发补丁，仅凭 `/read` 响应导航数字和卡片红点、光晕都清除。
 - 排序改为：置顶 → 被阻塞 → 运行中 → 所选顺序（默认新建在前）。帮助文案与测试同步。
 - `npm run verify`：179 项后端、67 项浏览器通过。
+
+## 2026-09-30：远程访问下实时推送失效（根因：Caddy 压缩了 event-stream）
+
+- 用户反馈红点不主动出现、刷新才出现，之前的"点进去不清除"也是同一现象。本机对正式服务直连推送流正常；通过域名 `https://discoverpaw.com:8443` 用临时只读分享做端到端验证：`/api/events` 响应 `content-encoding: gzip`，初始状态事件和三轮改动在 7.6 秒内一个都没到达。paw 上的 Caddy 站点块开了整站 `encode zstd gzip`，`text/event-stream` 被一起压缩，事件卡在压缩缓冲里。
+- 修复 paw 的 Caddyfile：`encode` 改为只匹配 html/css/js/json/svg 的响应，保留 `flush_interval -1`；已 `caddy validate` 并 reload，备份在 `/etc/caddy/Caddyfile.bak-20260930-230621`。复测：无压缩，初始状态即时到达，改动 0.4 秒内到达。临时分享已撤销。
+- SessionDeck 生成的 Caddy 模板加上 `flush_interval -1` 和"不要整站 encode"的说明，并有单元断言。
+- 兜底：服务端心跳从注释改为 `event: ping`（浏览器可观察）；客户端若 45 秒没有任何事件且页面可见，每 15 秒轮询完整状态，直到推送恢复。正式服务重启前没有 ping 事件，安静时会多一些轮询，无害。
+- `npm run verify`：179 项后端、67 项浏览器通过；`auth.test.ts` 新增模板断言后 6 项通过。

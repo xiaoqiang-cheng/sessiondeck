@@ -338,9 +338,17 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   useEffect(() => {
     void refresh().catch(() => {});
     const stream = new EventSource('/api/events');
-    stream.onopen = () => { setConnected(true); setHasConnected(true); setGroupReload((value) => value + 1); void getToken(true).catch(() => {}); void refresh().catch(() => {}); };
+    // Pings arrive every 20 s. A stream that goes quiet for longer is stuck
+    // somewhere (a buffering proxy, a half-open connection), so poll the full
+    // state until it recovers rather than showing stale cards indefinitely.
+    let lastEventAt = Date.now();
+    const touch = () => { lastEventAt = Date.now(); };
+    stream.onopen = () => { touch(); setConnected(true); setHasConnected(true); setGroupReload((value) => value + 1); void getToken(true).catch(() => {}); void refresh().catch(() => {}); };
     stream.onerror = () => setConnected(false);
+    stream.addEventListener('ping', touch);
+    const watchdog = setInterval(() => { if (Date.now() - lastEventAt > 45_000 && document.visibilityState === 'visible') void refresh().catch(() => {}); }, 15_000);
     stream.addEventListener('state', (event) => {
+      touch();
       try { acceptState(JSON.parse((event as MessageEvent).data)); }
       catch { setConnectionError('无法读取状态更新，正在等待重新连接'); }
     });
@@ -354,6 +362,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       finally { resyncing = false; }
     };
     stream.addEventListener('patch', (event) => {
+      touch();
       try {
         const patch = JSON.parse((event as MessageEvent).data) as StatePatch;
         const next = applyStatePatch(stateRef.current, patch);
@@ -361,7 +370,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       } catch { /* Malformed or skipped versions require a full snapshot. */ }
       void resync();
     });
-    return () => { live = false; stream.close(); };
+    return () => { live = false; clearInterval(watchdog); stream.close(); };
   }, [refresh, acceptState]);
   useEffect(() => {
     const resume = () => { if (document.visibilityState === 'visible') void refresh().catch(() => {}); };
