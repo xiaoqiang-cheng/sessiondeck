@@ -303,6 +303,7 @@ test('contact sorting and filters persist across reload with separate filters fo
   await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await page.locator('.backend-tabs').getByRole('button', { name: 'Codex', exact: true }).click();
   await page.getByLabel('按状态筛选').selectOption('idle');
+  await expect(page.locator('.session-card h3')).toHaveText(['Z 排序置顶', 'B 排序联系人', 'A 排序联系人']);
   await page.getByLabel('联系人排序').selectOption('name');
   await expect(page.locator('.session-card h3')).toHaveText(['Z 排序置顶', 'A 排序联系人', 'B 排序联系人']);
   await page.getByLabel('联系人排序').selectOption('created');

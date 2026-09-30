@@ -13,6 +13,7 @@ test('remote owner logs in, shares a session read-only, and revocation closes th
   await page.goto('/#/backends');
   const security = page.getByRole('region', { name: '远程访问与安全' });
   const password = 'browser owner password';
+  await expect(security).toBeVisible();
   if (await security.getByRole('button', { name: '设置密码', exact: true }).count()) {
     await security.getByLabel('新密码').fill(password);
     await security.getByLabel('确认密码').fill(password);

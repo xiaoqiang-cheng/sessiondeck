@@ -64,6 +64,10 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     // Esc belongs to the native CLI, so fullscreen uses a chord xterm never forwards.
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey && (event.metaKey || event.ctrlKey)) { setFullscreen((value) => !value); return false; }
+      // While an IME candidate list is open, digits and Space pick a candidate.
+      // Leave those keys to the IME; the chosen text arrives through the
+      // composition end event, never as a raw keystroke.
+      if (event.isComposing || event.keyCode === 229) return false;
       return true;
     });
     terminal.textarea?.setAttribute('aria-label', channel === 'shell' ? 'Shell 终端输入' : '原生会话终端输入');

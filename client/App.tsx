@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import {
   ArrowDownToLine, ArrowRight, Archive, Bell, BellOff, Check, CheckCheck,
   CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
-  GitFork, Layers3, LoaderCircle, MessageSquare, Pencil, Pin, Play, Plus,
+  GitFork, Layers3, LoaderCircle, MessageSquare, Pencil, Pin, PinOff, Play, Plus,
   Radio, Search, Send, Settings2, Share2, SlidersHorizontal, Square, UsersRound, X,
   PanelBottomOpen, Volume2, VolumeX, TerminalSquare, Link2,
 } from 'lucide-react';
@@ -80,7 +80,7 @@ function HelpDialog({ close }: { close: () => void }) {
       <h3>如何理解状态</h3>
       <ul className="status-guide"><li><span className="status-badge running">运行中</span><span>后端正在执行任务。</span></li><li><span className="status-badge waiting">等待输入 / 审批</span><span>需要你进入会话回复或决定。</span></li><li><span className="status-badge idle">空闲 / 已停止</span><span>当前没有执行任务；不代表工作已验收。</span></li><li><span className="status-badge unknown">状态未知</span><span>目前没有足够信息确认状态，进入原生会话查看。</span></li></ul>
       <p>标有“估测”的状态来自终端输出。卡片上的提醒、来源说明和原生会话可帮助你判断；断线时保留最后收到的状态。</p>
-      <h3>保留你的工作方式</h3><p>等待输入、审批或出现异常的会话自动排在最前，其次是置顶联系人，其余可按活动、名称或创建时间排列。有新提醒的卡片会轻轻跳动并发光，打开会话后消失。每个页面独立保存搜索和筛选，刷新后继续使用；Fork 继承上下文，原联系人保留。</p>
+      <h3>保留你的工作方式</h3><p>置顶联系人始终在最前；然后是等待输入、审批、出现异常或有新提醒的会话，再是正在运行的会话；其余默认按创建时间，也可改为最近活动或名称。有新提醒的卡片会轻轻跳动并发光，打开会话后消失。每个页面独立保存搜索和筛选，刷新后继续使用；Fork 继承上下文，原联系人保留。</p>
     </div><div className="modal-footer"><button className="button primary" onClick={close}>知道了</button></div>
   </ModalShell>;
 }
@@ -304,10 +304,19 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   }, [view]);
   useEffect(() => { setSelection(''); setModal(null); }, [selectedId]);
   useEffect(() => { if (selectedId) setWorkspaceSessionId(selectedId); }, [selectedId]);
+  // Viewing a session reads its reminders, whether or not you type anything.
+  // Re-run on every new reminder while it stays open and the tab is visible.
   useEffect(() => {
-    if (!selected?.id || document.visibilityState !== 'visible') return;
-    void api(`/sessions/${selected.id}/read`, {}).catch((cause) => setError(cause.message));
-  }, [selected?.id]);
+    if (!selected?.id || !selected.unread || document.visibilityState !== 'visible') return;
+    const id = selected.id;
+    const timer = setTimeout(() => { void api(`/sessions/${id}/read`, {}).catch((cause) => setError(cause.message)); }, 600);
+    return () => clearTimeout(timer);
+  }, [selected?.id, selected?.unread]);
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible' && stateRef.current && selectedId) { const item = stateRef.current.sessions.find(session => session.id === selectedId); if (item?.unread) void api(`/sessions/${item.id}/read`, {}).catch(() => {}); } };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [selectedId]);
   useEffect(() => {
     void refresh().catch(() => {});
     const stream = new EventSource('/api/events');
@@ -418,11 +427,15 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       && (statusFilter === 'all' || (statusFilter === 'attention' ? attention(session) : statusFilter === 'unread' ? session.unread > 0 : session.status === statusFilter))
       && `${session.title} ${session.cwd} ${session.lastUserInput || ''} ${BACKEND[session.backend].name}`.toLowerCase().includes(query.trim().toLowerCase());
   }).sort((a, b) => {
-    // IM-style ordering: whoever is waiting on you comes first, then pinned contacts.
-    if (attention(a) !== attention(b)) return Number(attention(b)) - Number(attention(a));
+    // Like a chat list: pinned stays on top; then contacts waiting on you (a
+    // reminder or a task that finished), then ones still working; the rest by
+    // the chosen order, where the default is newest first.
     if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
+    const needs = (s: Session) => attention(s) || s.unread > 0;
+    if (needs(a) !== needs(b)) return Number(needs(b)) - Number(needs(a));
+    if (a.running !== b.running) return Number(b.running) - Number(a.running);
     if (contactSort === 'name') return a.title.localeCompare(b.title, 'zh-CN', { numeric: true, sensitivity: 'base' });
-    return contactSort === 'created' ? new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() : new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
+    return contactSort === 'activity' ? new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime() : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });
   const title = currentGroup?.title ?? ({ contacts: '会话联系人', attention: '需要你处理', running: '正在运行', activity: '最近活动', archive: '已归档', backends: '连接与能力' } as Record<string, string>)[view] ?? '会话联系人';
   const filtered = !!query || backendFilter !== 'all' || statusFilter !== 'all';
@@ -482,7 +495,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
             <FilterMenu active={backendFilter !== 'all' || statusFilter !== 'all'} reset={() => { setBackendFilter('all'); setStatusFilter('all'); }}>
               <div className="filter-group"><span>后端</span><div className="backend-tabs" aria-label="按后端筛选"><button aria-pressed={backendFilter === 'all'} className={backendFilter === 'all' ? 'selected' : ''} onClick={() => setBackendFilter('all')}>全部</button>{(['claude', 'codex', 'dsh'] as Backend[]).map((backend) => <button key={backend} aria-pressed={backendFilter === backend} className={backendFilter === backend ? 'selected' : ''} onClick={() => setBackendFilter(backend)}>{BACKEND[backend].short}</button>)}</div></div>
               <label className="filter-group"><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as SessionStatus | 'all' | 'attention' | 'unread')}><option value="all">全部状态</option><option value="attention">需要处理</option><option value="unread">未读提醒</option><option value="running">运行中</option><option value="waiting_input">等待输入</option><option value="waiting_approval">等待审批</option><option value="idle">空闲</option><option value="error">异常</option><option value="stopped">已停止</option><option value="unknown">状态未知</option></select></label>
-              <label className="filter-group"><span>排序</span><select aria-label="联系人排序" value={contactSort} onChange={(event) => setContactSort(event.target.value as ContactSort)}><option value="activity">最近活动</option><option value="name">名称</option><option value="created">创建时间</option></select></label>
+              <label className="filter-group"><span>排序</span><select aria-label="联系人排序" value={contactSort} onChange={(event) => setContactSort(event.target.value as ContactSort)}><option value="created">创建时间</option><option value="activity">最近活动</option><option value="name">名称</option></select></label>
             </FilterMenu></>}
           {state?.demo && <span className="demo-badge" title="演示模式 · 示例数据">演示模式 · 示例数据</span>}
           <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
@@ -596,7 +609,7 @@ function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArch
     <div className="card-head">
       <span className="avatar-wrap"><BackendAvatar backend={session.backend} />{session.unread > 0 && <span className="unread-badge" aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</span>}</span>
       <div className="card-title">
-        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={(event) => onOpen(event.currentTarget)}><h3 title={session.title}>{session.title}</h3></button>{session.pinned && <Pin size={11} className="pinned-icon" aria-label="已置顶" />}</div>
+        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={(event) => onOpen(event.currentTarget)}><h3 title={session.title}>{session.title}</h3></button><button className={`icon-button card-pin ${session.pinned ? 'pinned' : ''}`} aria-label={session.pinned ? `取消置顶 ${session.title}` : `置顶 ${session.title}`} aria-pressed={session.pinned} title={session.pinned ? '取消置顶' : '置顶到最前'} onClick={onPin}>{session.pinned ? <Pin size={12} className="pinned-icon" /> : <PinOff size={12} />}</button></div>
         <dl className="card-meta">
           <div className="card-directory"><dt>目录</dt><dd title={session.cwd}>{shortPath(session.cwd)}</dd><button className="icon-button card-copy-directory" aria-label={`复制 ${session.title} 的工作目录`} title={`复制工作目录：${session.cwd}`} onClick={onCopyDirectory}><Copy size={12} /></button></div>
         </dl>
