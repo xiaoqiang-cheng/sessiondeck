@@ -1,4 +1,4 @@
-import { test } from './fixtures';
+import { mutationHeaders, test } from './fixtures';
 import { expect, type Page } from '@playwright/test';
 import type { AppState, Session } from '../shared/types';
 import type { CodexChatAnswer, CodexChatPatch, CodexChatSnapshot, CodexChatSubmission } from '../shared/chat';
@@ -14,8 +14,8 @@ async function emit(page: Page, url: string, type: string, data?: unknown) {
 async function fixture(page: Page) {
   const seed = await (await page.request.get('/api/state')).json() as AppState;
   expect(seed.demo).toBe(true);
-  const { csrfToken } = await (await page.request.get('/api/config')).json();
-  const created = await page.request.post('/api/sessions', { data: { backend: 'codex', title: 'Codex 图形界面回归', cwd: seed.defaultCwd }, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } });
+  const headers = await mutationHeaders(page.request);
+  const created = await page.request.post('/api/sessions', { data: { backend: 'codex', title: 'Codex 图形界面回归', cwd: seed.defaultCwd }, headers });
   expect(created.ok()).toBe(true);
   const contact = await created.json() as Session;
   const state: AppState = { ...seed, demo: false, sessions: [contact], groups: [], activities: [], revision: (seed.revision ?? 0) + 20,

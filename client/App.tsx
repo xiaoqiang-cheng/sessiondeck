@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import {
   ArrowDownToLine, ArrowRight, Archive, Bell, BellOff, Check, CheckCheck,
   ChevronRight, CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
@@ -91,6 +91,13 @@ export default function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [selection, setSelection] = useState('');
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [explorerWidth, setExplorerWidth] = useState(() => {
+    const raw = readLocalPreference('sessiondeck.layout.explorer');
+    const saved = raw === null ? NaN : Number(raw);
+    return Number.isFinite(saved) ? Math.max(320, Math.min(saved, 560)) : 380;
+  });
+  const explorerDragRef = useRef<{ x: number; width: number } | null>(null);
+  const explorerWidthRef = useRef(explorerWidth);
   const [workspaceSessionId, setWorkspaceSessionId] = useState<string | null>(null);
   const [privateViews, setPrivateViews] = useState<Record<string, string>>(() => Object.fromEntries(
     ['claude', 'codex', 'dsh'].map(backend => {
@@ -126,6 +133,8 @@ export default function App() {
   const seenServerInstancesRef = useRef(new Set<string>());
   const operationRef = useRef(false);
   const drawerRef = useRef<HTMLElement>(null);
+  const sessionInvokersRef = useRef(new Map<string, HTMLElement>());
+  const focusedSessionIdRef = useRef<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const groupId = view.startsWith('group:') ? view.slice(6) : null;
   const selected = state?.sessions.find((session) => session.id === selectedId) ?? null;
@@ -133,15 +142,51 @@ export default function App() {
   const { detail, error: groupError, loadOlder, loadingOlder, readSource } = useGroupHistory(groupId, currentGroup?.updatedAt, groupReload, state?.instanceId);
   const selectedGroup = state?.groups.find((group) => group.id === selected?.groupId);
   const selectedParent = state?.sessions.find((session) => session.id === selected?.parentId);
-  useDialog(drawerRef, !!selected, () => setSelectedId(null), true);
+  // The desktop session is an in-flow workbench rather than a modal dialog.
+  // Keep Escape as a lightweight close affordance without trapping focus or
+  // locking the document scroll used by the terminal and preview panes.
+  useDialog(drawerRef, false, () => setSelectedId(null), true);
+  useLayoutEffect(() => {
+    const previousId = focusedSessionIdRef.current;
+    const currentId = selected?.id ?? null;
+    if (previousId === currentId) return;
+    focusedSessionIdRef.current = currentId;
+    if (selected) {
+      if (!drawerRef.current?.contains(document.activeElement)) {
+        drawerRef.current?.querySelector<HTMLButtonElement>('[aria-label="关闭会话"]')?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (!previousId) return;
+    const invoker = sessionInvokersRef.current.get(previousId);
+    sessionInvokersRef.current.clear();
+    // Navigation or a click elsewhere in the nonmodal workbench keeps its own
+    // focus. Only replace the focus lost when the session pane was removed.
+    if (document.activeElement === document.body && invoker?.isConnected && !invoker.closest('[inert]') && invoker.getClientRects().length) {
+      invoker.focus({ preventScroll: true });
+    }
+  }, [selected?.id]);
+  useEffect(() => {
+    explorerWidthRef.current = explorerWidth;
+  }, [explorerWidth]);
+  useEffect(() => {
+    if (!selected) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.key !== 'Escape' || (event.target instanceof HTMLElement && event.target.closest('.terminal-pane'))) return;
+      if (modal) return;
+      event.preventDefault();
+      setSelectedId(null);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [selected, modal, setSelectedId]);
   notificationRef.current = notifications;
   soundRef.current = soundEnabled;
 
   const openTerminalPanel = useCallback((sessionId?: string) => {
     if (sessionId) setTerminalSessionId(sessionId);
-    setSelectedId(null);
     setTerminalPanelOpen(true);
-  }, [setSelectedId]);
+  }, []);
 
   const notificationSound = useCallback((unlock = false) => {
     if (typeof window === 'undefined') return;
@@ -317,12 +362,53 @@ export default function App() {
     finally { operationRef.current = false; setBusy(null); }
   };
   const navigate = (next: View) => updateRoute({ view: next, selectedId: null });
-  const openSession = (session: Session) => {
+  const openSession = (session: Session, invoker?: HTMLElement) => {
+    // A session is a focused workbench view. Open the explorer explicitly when
+    // you need it instead of carrying the list view's side panel into a chat.
+    const source = invoker ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    if (source && source !== document.body && !source.closest('.session-drawer, .modal-overlay')) {
+      sessionInvokersRef.current.set(session.id, source);
+    }
+    setWorkspaceOpen(false);
     setSelectedId(session.id); setSelection('');
   };
   const openSessionForInput = (session: Session) => {
     if (session.backend !== 'dsh' || state?.demo) selectPrivateView(session.backend, session.backend === 'codex' && session.interactionMode === 'chat' && !state?.demo ? 'chat' : 'terminal');
     openSession(session);
+  };
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const drag = explorerDragRef.current;
+      if (!drag) return;
+      const next = Math.max(320, Math.min(560, drag.width + event.clientX - drag.x));
+      explorerWidthRef.current = next;
+      setExplorerWidth(next);
+    };
+    const end = () => {
+      const drag = explorerDragRef.current;
+      if (!drag) return;
+      writeLocalPreference('sessiondeck.layout.explorer', String(explorerWidthRef.current));
+      explorerDragRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    return () => {
+      end();
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+    };
+  }, []);
+  const startExplorerResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    explorerDragRef.current = { x: event.clientX, width: explorerWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    event.preventDefault();
   };
   const copyText = async (value: string, label: string) => {
     try { await copyToClipboard(value); notify(`已复制${label}`); }
@@ -376,7 +462,7 @@ export default function App() {
   const workspaceSession = sessions.find(session => session.id === workspaceSessionId) ?? sessions.find(session => !session.archived);
 
   return <div className="app-shell">
-    <header className="topbar" inert={!!selected || !!modal}>
+    <header className="topbar" inert={!!modal}>
       <div className="topbar-row">
         <a className="brand" href="#" aria-label="SessionDeck" title="SessionDeck" onClick={(event) => { event.preventDefault(); navigate('contacts'); }}><span className="brand-mark"><Layers3 size={15} strokeWidth={2} /></span></a>
         <div className="nav-scroller">
@@ -393,7 +479,7 @@ export default function App() {
           <button className="icon-button" disabled={!state} aria-label="创建群组" title="创建群组" onClick={() => setModal({ type: 'group' })}><Plus size={16} /></button>
         </div>
         <div className="topbar-actions">
-          <button className={`icon-button ${terminalPanelOpen ? 'active' : ''}`} aria-label="打开终端" title={terminalPanelOpen ? '终端面板已打开' : '打开底部终端'} disabled={!state} onClick={() => openTerminalPanel()}><PanelBottomOpen size={17} /></button>
+          <button className={`icon-button ${terminalPanelOpen ? 'active' : ''}`} aria-label="打开终端" title={terminalPanelOpen ? '终端面板已打开' : '打开底部终端'} disabled={!state} onClick={() => openTerminalPanel(selected?.id)}><PanelBottomOpen size={17} /></button>
           {listView && <><label className="search-field"><Search size={15} /><input id="session-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索" aria-label="搜索联系人" /><kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></label>
             <FilterMenu active={backendFilter !== 'all' || statusFilter !== 'all'} reset={() => { setBackendFilter('all'); setStatusFilter('all'); }}>
               <div className="filter-group"><span>后端</span><div className="backend-tabs" aria-label="按后端筛选"><button aria-pressed={backendFilter === 'all'} className={backendFilter === 'all' ? 'selected' : ''} onClick={() => setBackendFilter('all')}>全部</button>{(['claude', 'codex', 'dsh'] as Backend[]).map((backend) => <button key={backend} aria-pressed={backendFilter === backend} className={backendFilter === backend ? 'selected' : ''} onClick={() => setBackendFilter(backend)}>{BACKEND[backend].short}</button>)}</div></div>
@@ -413,12 +499,13 @@ export default function App() {
       </div>
     </header>
 
-    <div className="workspace-layout" inert={!!selected || !!modal}>
+    <div className={`workspace-area ${selected ? 'session-active' : ''}`}>
+    <div className="workspace-layout" inert={!!modal}>
       {workspaceOpen && workspaceSession && !selected && <div className="workspace-sidebar">
         <label className="workspace-picker">工作目录<select aria-label="资源管理器工作区" value={workspaceSession.id} onChange={event => setWorkspaceSessionId(event.target.value)}>{sessions.filter(session => !session.archived || session.id === workspaceSession.id).map(session => <option key={session.id} value={session.id}>{session.title} · {shortPath(session.cwd)}</option>)}</select></label>
         <WorkspaceExplorer key={workspaceSession.id} session={workspaceSession} close={() => setWorkspaceOpen(false)} />
       </div>}
-    <main className="main-content" inert={!!selected || !!modal}>
+    <main className="main-content" inert={!!modal}>
       <h1 className="sr-only">{title}</h1>
       {state && !connected && <div className="connection-banner" role="status"><Radio size={15} /><span>{hasConnected ? '服务连接已中断，正在自动重连。卡片暂时显示上次收到的状态。' : '正在建立实时连接，卡片显示最近获取的状态。'}</span><button className="text-button" onClick={() => void refresh().catch(() => {})}>重新获取</button></div>}
       {connectionError && <div role="alert" className="error-banner connection-error"><span>{connectionError}</span><button className="text-button" onClick={() => void refresh().catch(() => {})}>重试连接</button></div>}
@@ -426,7 +513,7 @@ export default function App() {
 
       {!state && !connectionError && <div className="loading-state"><LoaderCircle className="spin" size={22} /><p>正在连接你的工作空间…</p></div>}
       {state && view === 'activity' ? <ActivityView activities={state.activities} sessions={state.sessions} open={openSession} /> : state && view === 'backends' ? <BackendSettings state={state} refresh={() => void run('refresh', () => api('/backends/refresh', {}), '已重新检测本机后端')} onCreate={(backend) => { setBackendFilter(backend); setModal({ type: 'create', backend }); }} /> : state && <>
-          {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={() => openSession(session)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
+          {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={(invoker) => openSession(session, invoker)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
 
           {currentGroup && groupError && <div className="error-banner" role="alert"><span>群组动态加载失败：{groupError}</span><button className="text-button" onClick={() => setGroupReload((value) => value + 1)}>重试群组动态</button></div>}
           {currentGroup && !groupError && (!detail || detail.group.id !== currentGroup.id) && <div className="loading-state" role="status"><LoaderCircle size={20} className="spin" /><p>正在读取群组动态…</p></div>}
@@ -437,9 +524,7 @@ export default function App() {
     </main>
 
     </div>
-    {state && <ShellTerminalDock open={terminalPanelOpen} sessionId={terminalSessionId} onClose={() => setTerminalPanelOpen(false)} inert={!!selected || !!modal} />}
-
-    {selected && state && <div className="drawer-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedId(null); }}><section ref={drawerRef} inert={!!modal} className="session-drawer" role="dialog" aria-modal="true" aria-label={`${selected.title} 的私聊`}>
+    {selected && state && <div className="drawer-overlay"><section ref={drawerRef} inert={!!modal} className="session-drawer" role="dialog" aria-modal="false" aria-label={`${selected.title} 的私聊`}>
       <header className="drawer-header">
         <BackendAvatar backend={selected.backend} />
         <div className="drawer-heading-text"><div className="drawer-title"><h2 title={selected.title}>{selected.title}</h2><button className="icon-button" title="改名" aria-label="改名" onClick={() => setModal({ type: 'rename', session: selected })}><Pencil size={13} /></button><StatusBadge session={selected} /></div>
@@ -461,13 +546,15 @@ export default function App() {
       {selected.archived && <div className="session-status-detail"><Archive size={14} />此联系人已归档，恢复到列表后可以继续运行。<button className="text-button" onClick={() => void patch(selected, { archived: false })}>恢复联系人</button></div>}
       {selected.unread > 0 && <div className="session-unread-notice" role="status" aria-live="polite"><Bell size={14} /><span>这个会话有 {selected.unread} 条新提醒</span><button className="text-button" disabled={!!busy} onClick={() => void run(`read:${selected.id}`, () => api(`/sessions/${selected.id}/read`, {}))}>标为已读</button></div>}
       {selected.statusDetail && <div role="status" aria-live="polite" className={`session-status-detail ${attention(selected) ? 'needs-attention' : ''}`}><span className={`status-point ${STATUS[selected.status].className}`} />{selected.statusDetail}<span className="source-label">{selected.statusSource === 'native' ? '后端状态' : selected.statusSource === 'terminal' ? '终端估测' : selected.statusSource === 'manual' ? '手动标记' : '进程状态'}</span></div>}
-      <div className={`session-workspace ${workspaceOpen ? 'explorer-open' : ''}`}>
-      {workspaceOpen && <WorkspaceExplorer key={selected.id} session={selected} close={() => setWorkspaceOpen(false)} />}
+      <div className={`session-workspace ${workspaceOpen ? 'explorer-open' : ''}`} style={{ '--explorer-width': `${explorerWidth}px` } as CSSProperties}>
+      {workspaceOpen && <><WorkspaceExplorer key={selected.id} session={selected} close={() => setWorkspaceOpen(false)} /><div className="workspace-resizer" role="separator" tabIndex={0} aria-label="调整资源管理器宽度" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={560} aria-valuenow={Math.round(explorerWidth)} onPointerDown={startExplorerResize} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); const next = Math.max(320, Math.min(560, explorerWidth + (event.key === 'ArrowRight' ? 24 : -24))); explorerWidthRef.current = next; setExplorerWidth(next); writeLocalPreference('sessiondeck.layout.explorer', String(next)); } }} /></>}
       <div className="session-conversation">
       {(selected.backend !== 'dsh' || state.demo) && <div className="private-view-switch" role="group" aria-label="会话显示方式"><button aria-pressed={privateView !== 'terminal'} onClick={() => switchPrivateView(codexChatAvailable ? 'chat' : 'conversation')}><MessageSquare size={14} />{codexChatAvailable ? '图形对话' : '对话记录'}</button><button aria-pressed={privateView === 'terminal'} disabled={!!busy} onClick={() => switchPrivateView('terminal')}><Command size={14} />原生终端</button><span>同一个会话，切换视图不重启</span></div>}
       {selected.backend === 'dsh' && !state.demo ? selected.nativeUrl ? <div className="native-web"><iframe title="DeepSeek Harness 会话" src={selected.nativeUrl} allow="clipboard-read; clipboard-write" /></div> : <div className="terminal-empty"><BackendAvatar backend="dsh" /><h3>直接使用 Harness 原生界面</h3><p>点击“{selected.forkPending ? '启动 Fork 会话' : selected.nativeSessionId ? '恢复原生会话' : '启动原生会话'}”，进入这个联系人的上下文。</p></div> : privateView === 'chat' ? <Suspense fallback={<div className="loading-state"><LoaderCircle size={22} className="spin" /><p>正在加载对话…</p></div>}><CodexChatPane key={selected.id} session={selected} onTerminal={() => switchPrivateView('terminal')} onSelection={setSelection} /></Suspense> : privateView === 'conversation' ? <ConversationPane key={selected.id} session={selected} onTerminal={() => switchPrivateView('terminal')} onSelection={setSelection} /> : codexChatAvailable && selected.running && selected.interactionMode === 'chat' ? <div className="terminal-empty"><Command size={26} /><h3>连接同一个 Codex 会话</h3><button className="button primary" disabled={!!busy} onClick={() => switchPrivateView('terminal')}>连接原生终端</button></div> : <TerminalPane key={selected.id} sessionId={selected.id} running={selected.running} status={selected.status} allowImages={selected.backend === 'codex' && !state.demo} onSelection={setSelection} />}
       </div></div>
     </section></div>}
+    </div>
+    {state && <ShellTerminalDock open={terminalPanelOpen} sessionId={terminalSessionId} onClose={() => setTerminalPanelOpen(false)} inert={!!modal} />}
 
     {modal?.type === 'help' && <HelpDialog close={closeModal} />}
     {modal?.type === 'replaceDraft' && <ModalShell title="替换当前群组草稿？" subtitle={`将 ${modal.sourceName} 的消息转交为任务，当前草稿需要先处理。`} close={closeModal}><div className="modal-fields"><p className="draft-replace-preview">{modal.draft || '当前草稿已选择接收成员。'}</p><p className="form-note">保留草稿会取消这次转交。替换后，可编辑任务内容并选择接收成员；创建任务仍需你提交。</p></div><div className="modal-footer"><button className="button secondary" onClick={closeModal}>保留当前草稿</button><button className="button primary" onClick={() => { modal.proceed(); closeModal(); }}>替换为转交任务</button></div></ModalShell>}
@@ -477,7 +564,7 @@ export default function App() {
 }
 
 function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArchive, onCopyDirectory }: {
-  session: Session; canFork: boolean; onOpen: () => void; onRename: () => void; onFork: () => void; onPin: () => void; onArchive: () => void; onCopyDirectory: () => void;
+  session: Session; canFork: boolean; onOpen: (invoker?: HTMLElement) => void; onRename: () => void; onFork: () => void; onPin: () => void; onArchive: () => void; onCopyDirectory: () => void;
 }) {
   const [menu, setMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -499,11 +586,11 @@ function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArch
     return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape); };
   }, [menu]);
   const preview = session.statusDetail || (session.forkPending ? '启动时将通过原生能力分叉上下文' : session.nativeSessionId ? '上下文已连接，点击继续' : '准备就绪，点击进入会话');
-  return <article onClick={(event) => { if (!(event.target as Element).closest('button, a, .dropdown-menu')) onOpen(); }} className={`session-card tone-${STATUS[session.status].className} ${attention(session) ? 'has-attention' : ''} ${session.unread > 0 && !session.archived ? 'has-unread' : ''} ${session.archived ? 'archived-card' : ''}`}>
+  return <article onClick={(event) => { if (!(event.target as Element).closest('button, a, .dropdown-menu')) onOpen(event.currentTarget.querySelector<HTMLButtonElement>('.card-main') ?? undefined); }} className={`session-card tone-${STATUS[session.status].className} ${attention(session) ? 'has-attention' : ''} ${session.unread > 0 && !session.archived ? 'has-unread' : ''} ${session.archived ? 'archived-card' : ''}`}>
     <div className="card-head">
       <span className="avatar-wrap"><BackendAvatar backend={session.backend} />{session.unread > 0 && <span className="unread-badge" aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</span>}</span>
       <div className="card-title">
-        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={onOpen}><h3 title={session.title}>{session.title}</h3></button>{session.pinned && <Pin size={11} className="pinned-icon" aria-label="已置顶" />}</div>
+        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={(event) => onOpen(event.currentTarget)}><h3 title={session.title}>{session.title}</h3></button>{session.pinned && <Pin size={11} className="pinned-icon" aria-label="已置顶" />}</div>
         <dl className="card-meta">
           <div className="card-directory"><dt>目录</dt><dd title={session.cwd}>{shortPath(session.cwd)}</dd><button className="icon-button card-copy-directory" aria-label={`复制 ${session.title} 的工作目录`} title={`复制工作目录：${session.cwd}`} onClick={onCopyDirectory}><Copy size={12} /></button></div>
         </dl>

@@ -1,4 +1,4 @@
-import { test } from './fixtures';
+import { mutationHeaders, test } from './fixtures';
 import { expect, type APIRequestContext, type Locator } from '@playwright/test';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -8,8 +8,8 @@ import { join } from 'node:path';
 import type { AppState, Session } from '../shared/types';
 
 async function mutate<T>(request: APIRequestContext, path: string, body: unknown = {}, method = 'POST'): Promise<T> {
-  const { csrfToken } = await (await request.get('/api/config')).json();
-  const response = await request.fetch(`/api${path}`, { method, data: body, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } });
+  const headers = await mutationHeaders(request);
+  const response = await request.fetch(`/api${path}`, { method, data: body, headers });
   expect(response.ok()).toBeTruthy();
   return response.json() as Promise<T>;
 }
@@ -74,10 +74,33 @@ test('workspace sidebar renders markdown and real git diff without blocking the 
     await page.goto('/');
     await page.getByRole('button', { name: `进入 ${session.title} 的会话`, exact: true }).click();
     const drawer = page.getByRole('dialog', { name: `${session.title} 的私聊` });
+    await expect(page.getByRole('complementary', { name: '资源管理器' })).toHaveCount(0);
     await drawer.getByRole('button', { name: '资源管理器', exact: true }).click();
     const explorer = page.getByRole('complementary', { name: '资源管理器' });
     await explorer.getByRole('button', { name: /README\.md/ }).click();
     await expect(explorer.locator('.workspace-preview .chat-markdown h1')).toHaveText('Sidebar preview');
+    const treeBounds = await explorer.locator('.workspace-list-pane').boundingBox();
+    const previewBounds = await explorer.locator('.workspace-preview-pane').boundingBox();
+    expect(previewBounds!.x).toBeGreaterThanOrEqual(treeBounds!.x + treeBounds!.width);
+    expect(Math.abs(previewBounds!.y - treeBounds!.y)).toBeLessThan(2);
+    const outerSplitter = drawer.getByRole('separator', { name: '调整资源管理器宽度', exact: true });
+    const initialExplorerWidth = Number(await outerSplitter.getAttribute('aria-valuenow'));
+    await outerSplitter.focus();
+    await outerSplitter.press('ArrowRight');
+    await expect(outerSplitter).toHaveAttribute('aria-valuenow', String(initialExplorerWidth + 24));
+    const treeSplitter = explorer.getByRole('separator', { name: '调整文件树与预览宽度' });
+    const initialTreeWidth = Number(await treeSplitter.getAttribute('aria-valuenow'));
+    const treeBox = await treeSplitter.boundingBox();
+    expect(treeBox).not.toBeNull();
+    await page.mouse.move(treeBox!.x + 3, treeBox!.y + treeBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(treeBox!.x + 70, treeBox!.y + treeBox!.height / 2);
+    await page.mouse.up();
+    await expect.poll(async () => Number(await treeSplitter.getAttribute('aria-valuenow'))).toBeGreaterThan(initialTreeWidth);
+    await treeSplitter.focus();
+    const resizedTreeWidth = Number(await treeSplitter.getAttribute('aria-valuenow'));
+    await treeSplitter.press('ArrowLeft');
+    await expect(treeSplitter).toHaveAttribute('aria-valuenow', String(resizedTreeWidth - 4));
     await explorer.getByRole('button', { name: 'Git diff', exact: true }).click();
     await explorer.getByRole('button', { name: /README\.md/ }).click();
     await expect(explorer.locator('.workspace-diff')).toContainText('+**Updated content**');
@@ -88,9 +111,11 @@ test('workspace sidebar renders markdown and real git diff without blocking the 
     await page.getByRole('button', { name: '关闭资源管理器', exact: true }).click();
     await page.getByRole('button', { name: '打开资源管理器', exact: true }).click();
     await expect(explorer).toBeVisible();
+    await expect.poll(async () => Number(await explorer.getByRole('separator', { name: '调整文件树与预览宽度' }).getAttribute('aria-valuenow'))).toBeGreaterThan(initialTreeWidth);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: 'artifacts/workspace-mobile.png' });
     await expect(page.getByRole('button', { name: '关闭资源管理器', exact: true })).toBeInViewport();
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -106,10 +131,14 @@ test('opening a shell from a contact uses its directory and is immediately inter
     await page.getByRole('button', { name: '隐藏终端面板', exact: true }).click();
     await page.getByRole('button', { name: `进入 ${session.title} 的会话`, exact: true }).click();
     await page.getByRole('button', { name: '终端面板', exact: true }).click();
-    await expect(page.getByRole('dialog')).not.toBeVisible();
+    // The session remains in the main workbench while the shared terminal dock
+    // opens below it, matching VS Code's panel behavior.
+    await expect(page.getByRole('dialog', { name: `${session.title} 的私聊` })).toBeVisible();
     const dock = page.getByRole('region', { name: '底部终端面板' });
     await expect(dock.locator('.terminal-connection.connected')).toHaveCount(1);
     await expect(dock.locator('.terminal-dock-tab')).toHaveCount(2);
+    await expect(page.getByRole('dialog', { name: `${session.title} 的私聊` }).locator('.session-conversation')).toBeVisible();
+    await page.screenshot({ path: 'artifacts/workbench-terminal.png' });
     await command(dock, 'pwd');
     await expect(dock.locator('.xterm-accessibility-tree')).toContainText(root);
     await command(dock, 'exit');

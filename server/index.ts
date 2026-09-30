@@ -783,7 +783,7 @@ if (process.argv.includes('--dev')) {
   const vite = await createViteServer({ root, server: { middlewareMode: true, hmr: { server }, allowedHosts: wildcardHost ? true : undefined }, appType: 'spa' });
   app.use(vite.middlewares);
 } else {
-  const dist = join(root, 'dist/client');
+  const dist = resolve(process.env.SESSIONDECK_CLIENT_DIR || join(root, 'dist/client'));
   if (!existsSync(join(dist, 'index.html'))) console.warn('尚未构建前端，请先 npm run build，或使用 npm run dev。');
   app.use(express.static(dist));
   app.get('/{*path}', (_req, res) => res.sendFile(join(dist, 'index.html')));

@@ -1,5 +1,13 @@
-import { test as base, expect } from '@playwright/test';
+import { test as base, expect, type APIRequestContext } from '@playwright/test';
 import type { AppState } from '../shared/types';
+
+/** Follow the actual test server, including a custom SESSIONDECK_TEST_PORT. */
+export async function mutationHeaders(request: APIRequestContext) {
+  const response = await request.get('/api/config');
+  expect(response.ok(), 'read CSRF configuration from the isolated test server').toBeTruthy();
+  const { csrfToken } = await response.json();
+  return { 'X-SessionDeck-Token': csrfToken as string, Origin: new URL(response.url()).origin };
+}
 
 /** Tests share a seeded demo server, but every test owns and cleans its PTYs. */
 export const test = base.extend<{ demoProcessCleanup: void }>({
@@ -11,9 +19,9 @@ export const test = base.extend<{ demoProcessCleanup: void }>({
     const after = await (await request.get('/api/state')).json() as AppState;
     const ownedProcesses = after.sessions.filter(session => !existing.has(session.id) && session.running);
     if (!ownedProcesses.length) return;
-    const { csrfToken } = await (await request.get('/api/config')).json();
+    const headers = await mutationHeaders(request);
     for (const session of ownedProcesses) {
-      const response = await request.post(`/api/sessions/${session.id}/stop`, { data: {}, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } });
+      const response = await request.post(`/api/sessions/${session.id}/stop`, { data: {}, headers });
       expect(response.ok(), `stop the demo process owned by this test: ${session.title}`).toBeTruthy();
     }
   }, { auto: true }],

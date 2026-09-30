@@ -6,7 +6,10 @@ usage() {
     'Usage: ./start.sh [--dev | --help]' \
     '' \
     'Default: install missing/outdated dependencies, build, and start SessionDeck.' \
+    'Startup checks the port and data directory before installing or building.' \
+    'An existing instance is left running; use a separate port and data directory.' \
     '--dev:   start with automatic reload instead of a production build.' \
+    '         Server edits restart the app and interrupt its sessions/terminals.' \
     '' \
     'Requires Node.js 24+ and npm. Press Ctrl+C to stop.' \
     'Settings: SESSIONDECK_HOST, SESSIONDECK_PORT, SESSIONDECK_DATA_DIR,' \
@@ -32,6 +35,11 @@ if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0
   printf 'Node.js 24+ is required; found %s.\n' "$(node --version)" >&2
   exit 1
 fi
+
+# Check before npm can replace dependencies or a build can change served assets.
+# This uses only Node builtins and never stops an existing instance.
+node scripts/check-start.mjs
+
 if ! command -v npm >/dev/null 2>&1; then
   printf '%s\n' 'npm is required. Install it with Node.js and try again.' >&2
   exit 1

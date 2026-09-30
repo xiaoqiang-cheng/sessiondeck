@@ -1,4 +1,4 @@
-import { test } from './fixtures';
+import { mutationHeaders, test } from './fixtures';
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 import type { AppState, Group, GroupDetail, Session } from '../shared/types';
@@ -10,8 +10,8 @@ async function readState(request: APIRequestContext) {
 }
 
 async function mutate<T>(request: APIRequestContext, path: string, body: unknown = {}, method = 'POST'): Promise<T> {
-  const { csrfToken } = await (await request.get('/api/config')).json();
-  const response = await request.fetch(`/api${path}`, { method, data: body, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } });
+  const headers = await mutationHeaders(request);
+  const response = await request.fetch(`/api${path}`, { method, data: body, headers });
   expect(response.ok(), `demo API ${method} ${path} should succeed`).toBeTruthy();
   return await response.json() as T;
 }

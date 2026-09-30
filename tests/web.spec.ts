@@ -1,4 +1,4 @@
-import { test } from './fixtures';
+import { mutationHeaders, test } from './fixtures';
 import { expect } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 
@@ -74,8 +74,8 @@ test('mobile layout keeps contacts and navigation usable without horizontal over
 });
 
 async function createTestGroup(page: import('@playwright/test').Page, title: string) {
-  const { csrfToken } = await (await page.request.get('/api/config')).json();
-  const response = await page.request.post('/api/groups', { data: { title, goal: '浏览器交互回归' }, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } });
+  const headers = await mutationHeaders(page.request);
+  const response = await page.request.post('/api/groups', { data: { title, goal: '浏览器交互回归' }, headers });
   expect(response.ok()).toBeTruthy();
   return await response.json() as { id: string; title: string };
 }
@@ -86,7 +86,7 @@ async function openGroup(page: import('@playwright/test').Page, title: string) {
   await expect(page.getByLabel('群组消息')).toBeVisible();
 }
 
-test('keyboard navigation keeps focus in dialogs and preserves native terminal Escape', async ({ page }) => {
+test('keyboard navigation keeps modal focus, leaves the workbench interactive, and preserves native terminal Escape', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '会话联系人', exact: true })).toBeVisible();
   await page.keyboard.press('Control+k');
@@ -106,12 +106,18 @@ test('keyboard navigation keeps focus in dialogs and preserves native terminal E
   await card.click();
   const drawer = page.getByRole('dialog', { name: 'SessionDeck · 开发笔记 的私聊' });
   await expect(drawer).toBeVisible();
-  await expect(page.locator('main')).toHaveAttribute('inert', '');
+  // The session is an in-flow workbench view; the contact list remains
+  // available behind it instead of being made inert like a modal dialog.
+  await expect(page.locator('main')).not.toHaveAttribute('inert');
+  await expect(drawer).toHaveAttribute('aria-modal', 'false');
+  await card.focus();
+  await expect(card).toBeFocused();
   await page.getByLabel('原生会话终端输入').focus();
   await page.keyboard.press('Escape');
   await expect(drawer).toBeVisible();
   await drawer.getByRole('button', { name: '改名', exact: true }).click();
   const rename = page.getByRole('dialog', { name: '给联系人改个名字' });
+  await expect(drawer).toHaveAttribute('inert', '');
   await expect(rename.getByLabel('联系人名称')).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(rename).not.toBeVisible();
@@ -243,8 +249,8 @@ test('session info copies native identity and workspace path, with links back to
   await page.screenshot({ path: 'artifacts/session-info.png', fullPage: true });
   await page.getByRole('button', { name: '关闭会话', exact: true }).click();
 
-  const { csrfToken } = await (await page.request.get('/api/config')).json();
-  const fork = await (await page.request.post(`/api/sessions/${source.id}/fork`, { data: { title: '来源链接回归' }, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } })).json();
+  const headers = await mutationHeaders(page.request);
+  const fork = await (await page.request.post(`/api/sessions/${source.id}/fork`, { data: { title: '来源链接回归' }, headers })).json();
   await page.goto(`/#/contacts?session=${fork.id}`);
   await expect(page.getByRole('dialog', { name: '来源链接回归 的私聊' })).toBeVisible();
   await page.getByRole('navigation', { name: '会话关系' }).getByRole('button', { name: '来源：SessionDeck · 开发笔记', exact: true }).click();
@@ -253,9 +259,9 @@ test('session info copies native identity and workspace path, with links back to
 });
 
 test('activity timeline filters events and opens the related session through a restorable route', async ({ page }) => {
-  const { csrfToken } = await (await page.request.get('/api/config')).json();
+  const headers = await mutationHeaders(page.request);
   const state = await (await page.request.get('/api/state')).json();
-  const response = await page.request.post('/api/sessions', { data: { title: '活动入口回归', backend: 'codex', cwd: state.defaultCwd }, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' } });
+  const response = await page.request.post('/api/sessions', { data: { title: '活动入口回归', backend: 'codex', cwd: state.defaultCwd }, headers });
   expect(response.ok()).toBeTruthy();
   await page.goto('/#/activity');
   await expect(page.getByRole('heading', { name: '最近活动', exact: true })).toBeVisible();
@@ -423,9 +429,8 @@ test('unrelated session updates do not reload group history, while group revisio
 
 test('group messages become editable directed tasks with persistent source and explicit draft replacement', async ({ page }) => {
   const group = await createTestGroup(page, '群组转交回归');
-  const { csrfToken } = await (await page.request.get('/api/config')).json();
+  const headers = await mutationHeaders(page.request);
   const state = await (await page.request.get('/api/state')).json();
-  const headers = { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' };
   const memberResponse = await page.request.post('/api/sessions', { data: { title: '转交来源成员', backend: 'codex', cwd: state.defaultCwd, groupId: group.id }, headers });
   expect(memberResponse.ok()).toBeTruthy();
   const member = await memberResponse.json();
@@ -509,6 +514,7 @@ test('card actions are reachable with keyboard and menu direction keys open a re
   await page.keyboard.press('Enter');
   const drawer = page.getByRole('dialog', { name: 'SessionDeck · 开发笔记 的私聊' });
   await expect(drawer).toBeVisible();
+  await expect(drawer.locator(':focus')).toHaveCount(1);
   await drawer.getByRole('button', { name: '关闭会话', exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(card).toBeFocused();

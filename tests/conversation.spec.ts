@@ -1,11 +1,11 @@
-import { test } from './fixtures';
+import { mutationHeaders, test } from './fixtures';
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
 import type { AppState, ConversationTranscript, Group, Session } from '../shared/types';
 
 async function mutate<T>(request: APIRequestContext, path: string, body: unknown = {}): Promise<T> {
-  const { csrfToken } = await (await request.get('/api/config')).json();
+  const headers = await mutationHeaders(request);
   const response = await request.post(`/api${path}`, {
-    data: body, headers: { 'X-SessionDeck-Token': csrfToken, Origin: 'http://127.0.0.1:4337' },
+    data: body, headers,
   });
   expect(response.ok(), `${path} must succeed in the local demo fixture`).toBe(true);
   return await response.json() as T;

@@ -4,7 +4,9 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   build: {
-    outDir: 'dist/client',
+    // Browser tests build into an isolated throwaway directory so they never
+    // replace assets served by an already-running local SessionDeck instance.
+    outDir: process.env.SESSIONDECK_CLIENT_DIR || 'dist/client',
     emptyOutDir: true,
     rollupOptions: {
       output: {
