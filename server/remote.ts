@@ -1,11 +1,35 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { RemoteSettings, RemoteStatus, TunnelState } from '../shared/auth.ts';
 
 export const DEFAULT_REMOTE: Omit<RemoteSettings, 'localPort'> = {
-  enabled: false, publicUrl: '', sshHost: '', sshUser: '', sshPort: 22, identityFile: '', serverPort: 17_317,
+  enabled: false, publicUrl: '', sshHost: '', sshUser: '', sshPort: 22, identityFile: '', hasPassword: false, serverPort: 17_317,
 };
+
+/**
+ * The SSH password is sealed with a key file kept next to the database (0600).
+ * A copied database alone does not reveal it; neither does the settings API.
+ */
+export class SecretBox {
+  constructor(private readonly key: Buffer) {}
+  seal(value: string) {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.key, iv);
+    const data = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+    return [iv, cipher.getAuthTag(), data].map(part => part.toString('base64')).join('.');
+  }
+  open(sealed: string) {
+    const [iv, tag, data] = sealed.split('.').map(part => Buffer.from(part, 'base64'));
+    const decipher = createDecipheriv('aes-256-gcm', this.key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+  }
+}
+export const secretKey = (material: Buffer) => createHash('sha256').update(material).digest();
 
 function fail(message: string): never { throw Object.assign(new Error(message), { status: 400 }); }
 const port = (value: unknown, name: string) => {
@@ -40,6 +64,7 @@ export function normalizeRemote(input: Record<string, unknown>, current: RemoteS
     if (file && (file.startsWith('-') || file.length > 1024 || /[\x00\n]/.test(file))) fail('密钥路径无效');
     next.identityFile = file;
   }
+  if ('sshPassword' in input && (typeof input.sshPassword !== 'string' || input.sshPassword.length > 256 || /[\x00\n\r]/.test(input.sshPassword))) fail('SSH 密码无效');
   if ('sshPort' in input) next.sshPort = port(input.sshPort, 'SSH 端口');
   if ('serverPort' in input) next.serverPort = port(input.serverPort, '服务器转发端口');
   if ('localPort' in input) next.localPort = port(input.localPort, '远程监听端口');
@@ -49,8 +74,10 @@ export function normalizeRemote(input: Record<string, unknown>, current: RemoteS
 }
 
 export function caddyConfig(settings: RemoteSettings) {
+  // A non-default port (443 already taken, for example) is kept in the site
+  // address; Caddy then serves TLS there and obtains the certificate over :80.
   const host = settings.publicUrl ? new URL(settings.publicUrl).host : 'deck.example.com';
-  return `# /etc/caddy/Caddyfile（服务器上执行一次，Caddy 会自动申请证书）
+  return `# 追加到 /etc/caddy/Caddyfile（服务器上执行一次，Caddy 会自动申请证书）
 ${host} {
 \treverse_proxy 127.0.0.1:${settings.serverPort}
 }`;
@@ -70,6 +97,8 @@ export class Tunnel extends EventEmitter {
   private error = '';
   private attempts = 0;
   private closed = false;
+  private password: string | null = null;
+  constructor(private readonly runtimeDir: string) { super(); }
 
   status(): RemoteStatus['tunnel'] { return { state: this.state, since: this.since, error: this.error, attempts: this.attempts }; }
 
@@ -79,8 +108,9 @@ export class Tunnel extends EventEmitter {
     this.emit('change');
   }
 
-  async configure(settings: RemoteSettings | null) {
+  async configure(settings: RemoteSettings | null, password: string | null = null) {
     this.settings = settings?.enabled ? settings : null;
+    this.password = password;
     this.attempts = 0;
     await this.kill();
     if (this.settings) this.connect(); else this.set('off', '');
@@ -90,8 +120,15 @@ export class Tunnel extends EventEmitter {
     const settings = this.settings;
     if (!settings || this.closed) return;
     const identity = settings.identityFile.replace(/^~(?=\/|$)/, homedir());
+    const password = this.password;
+    // With a password, ssh asks SSH_ASKPASS instead of a terminal. The helper
+    // reads it from this child's environment: never argv, never a shell string.
+    const askpass = password ? this.askpassHelper() : null;
+    const auth = password
+      ? ['-o', 'BatchMode=no', '-o', 'NumberOfPasswordPrompts=1', '-o', 'PreferredAuthentications=publickey,password,keyboard-interactive']
+      : ['-o', 'BatchMode=yes'];
     const args = [
-      '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+      '-N', '-T', ...auth, '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
       '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=15', '-p', String(settings.sshPort),
       ...(identity ? ['-i', identity, '-o', 'IdentitiesOnly=yes'] : []),
       // Bind only the server's loopback: the public side is Caddy's TLS, never ssh.
@@ -100,7 +137,9 @@ export class Tunnel extends EventEmitter {
     ];
     this.set('connecting');
     let stderr = '';
-    const child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const env = askpass ? { ...process.env, SSH_ASKPASS: askpass, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: process.env.DISPLAY || ':0', SESSIONDECK_SSH_PASSWORD: password! } : process.env;
+    // detached gives ssh no controlling terminal, so it cannot prompt on ours.
+    const child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'], env, detached: !!askpass });
     this.child = child;
     child.stderr?.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
     // ssh has no "forward established" signal; ExitOnForwardFailure exits
@@ -113,11 +152,19 @@ export class Tunnel extends EventEmitter {
       this.child = null;
       if (this.closed || !this.settings) return;
       this.attempts++;
-      const message = stderr.trim().split('\n').filter(line => !/^Warning: Permanently added/.test(line)).at(-1) || `ssh 已退出（${code ?? '信号'}）`;
+      const last = stderr.trim().split('\n').filter(line => !/^Warning: Permanently added/.test(line)).at(-1) || `ssh 已退出（${code ?? '信号'}）`;
+      const message = /Permission denied/.test(last) ? `SSH 认证失败：${password ? '请检查密码' : '请配置密钥或填写 SSH 密码'}（${last}）` : last;
       this.set('error', message);
       const delay = Math.min(2000 * 2 ** Math.min(this.attempts - 1, 5), 60_000);
       this.timer = setTimeout(() => { this.timer = null; this.connect(); }, delay);
     });
+  }
+
+  private askpassHelper() {
+    const file = join(this.runtimeDir, 'ssh-askpass.sh');
+    writeFileSync(file, '#!/bin/sh\nprintf \'%s\\n\' "$SESSIONDECK_SSH_PASSWORD"\n', { mode: 0o700 });
+    chmodSync(file, 0o700);
+    return file;
   }
 
   private async kill() {

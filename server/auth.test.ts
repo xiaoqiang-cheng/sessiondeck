@@ -224,3 +224,33 @@ test('remote listener requires login, shares see one session and read-only termi
   assert.equal((await colleague.call('/api/state')).status, 401);
   assert.equal((await collaborator.call('/api/state')).status, 200, 'other shares keep working');
 });
+
+test('SSH password reaches ssh through askpass, never argv, and is sealed at rest', async () => {
+  const { Tunnel, SecretBox, secretKey } = await import('./remote.ts');
+  const { mkdtempSync, writeFileSync, chmodSync, readFileSync, rmSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'sessiondeck-askpass-'));
+  const record = join(dir, 'record.txt');
+  // A fake ssh records its argv and what SSH_ASKPASS returns, then stays up.
+  writeFileSync(join(dir, 'ssh'), `#!/bin/sh\nprintf 'ARGV:%s\\n' "$*" > "${record}"\nprintf 'ASKPASS:%s\\n' "$("$SSH_ASKPASS")" >> "${record}"\nexec sleep 30\n`);
+  chmodSync(join(dir, 'ssh'), 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath}`;
+  const tunnel = new Tunnel(dir);
+  try {
+    const settings = { ...DEFAULT_REMOTE, enabled: true, publicUrl: 'https://deck.example.com', sshHost: 'example.com', sshUser: 'ubuntu', localPort: 4318 };
+    await tunnel.configure(settings, 'p@ss word$`x');
+    await until(() => { try { return readFileSync(record, 'utf8').includes('ASKPASS:'); } catch { return false; } }, 'fake ssh ran');
+    const recorded = readFileSync(record, 'utf8');
+    assert.match(recorded, /ASKPASS:p@ss word\$`x/);
+    assert.ok(!/ARGV:.*p@ss/.test(recorded), 'password is not in argv');
+    assert.match(recorded, /BatchMode=no/);
+    assert.match(recorded, /-R 127\.0\.0\.1:17317:127\.0\.0\.1:4318/);
+  } finally {
+    await tunnel.close(); process.env.PATH = originalPath; rmSync(dir, { recursive: true, force: true });
+  }
+  const box = new SecretBox(secretKey(Buffer.from('k')));
+  const sealed = box.seal('secret-value');
+  assert.ok(!sealed.includes('secret-value'));
+  assert.equal(box.open(sealed), 'secret-value');
+  assert.throws(() => new SecretBox(secretKey(Buffer.from('other'))).open(sealed));
+});

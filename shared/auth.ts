@@ -38,9 +38,13 @@ export interface RemoteSettings {
   sshUser: string;
   sshPort: number;
   identityFile: string;
+  /** Whether an SSH password is saved. The password itself never leaves the server. */
+  hasPassword: boolean;
   /** Loopback port on the server that Caddy proxies to. */
   serverPort: number;
 }
+/** Settings patch from the page: a password is write-only; '' clears it. */
+export type RemoteSettingsInput = Partial<Omit<RemoteSettings, 'hasPassword'>> & { sshPassword?: string };
 
 export type TunnelState = 'off' | 'connecting' | 'connected' | 'error';
 export interface RemoteStatus {

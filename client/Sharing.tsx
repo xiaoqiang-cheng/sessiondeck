@@ -69,6 +69,7 @@ const tunnelLabel: Record<RemoteStatus['tunnel']['state'], string> = { off: '未
 export function SecuritySettings({ auth, notify }: { auth: Extract<AuthStatus, { kind: 'owner' }>; notify: (message: string) => void }) {
   const [remote, setRemote] = useState<RemoteStatus | null>(null);
   const [draft, setDraft] = useState<RemoteSettings | null>(null);
+  const [sshPassword, setSshPassword] = useState('');
   const [devices, setDevices] = useState<AuthDevice[]>([]);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -97,8 +98,9 @@ export function SecuritySettings({ auth, notify }: { auth: Extract<AuthStatus, {
     void run('password', async () => { await api('/auth/password', { password }); setPassword(''); setConfirm(''); setPasswordSet(true); await load(); }, '密码已保存，其他远程登录已退出');
   };
   const saveRemote = (enabled: boolean) => draft && run('remote', async () => {
-    const status = await api<RemoteStatus>('/remote', { ...draft, enabled });
-    setRemote(status); setDraft(status.settings);
+    const { hasPassword: _saved, ...settings } = draft;
+    const status = await api<RemoteStatus>('/remote', { ...settings, enabled, ...(sshPassword ? { sshPassword } : {}) });
+    setRemote(status); setDraft(status.settings); setSshPassword('');
   }, enabled ? '已保存并连接远程访问' : '已停用远程访问');
   const field = (key: keyof RemoteSettings, label: string, placeholder = '', type = 'text') => <label className="form-label">{label}<input disabled={!local} type={type} placeholder={placeholder} value={String(draft?.[key] ?? '')} onChange={event => setDraft(current => current && { ...current, [key]: type === 'number' ? Number(event.target.value) : event.target.value })} /></label>;
   const tunnel = remote?.tunnel;
@@ -120,6 +122,7 @@ export function SecuritySettings({ auth, notify }: { auth: Extract<AuthStatus, {
       {field('sshHost', '服务器地址', '203.0.113.10 或 ssh 别名')}
       {field('sshUser', 'SSH 用户', 'deploy')}
       {field('sshPort', 'SSH 端口', '22', 'number')}
+      <label className="form-label">SSH 密码（可选）<input disabled={!local} type="password" autoComplete="new-password" placeholder={draft?.hasPassword ? '已保存，输入新密码以更换' : '使用密钥时留空'} value={sshPassword} onChange={event => setSshPassword(event.target.value)} /></label>
       {field('identityFile', 'SSH 密钥（可选）', '~/.ssh/id_ed25519')}
       {field('serverPort', '服务器转发端口', '17317', 'number')}
     </div>
@@ -130,7 +133,7 @@ export function SecuritySettings({ auth, notify }: { auth: Extract<AuthStatus, {
     </div>
     {local && !passwordSet && <p className="form-note"><CircleAlert size={14} />启用远程访问前请先设置所有者密码。</p>}
     <details className="security-caddy"><summary>服务器配置（一次性）</summary>
-      <ol><li>确认服务器已安装 Caddy，并把域名解析到服务器 IP。</li><li>把下面的配置写入 <code>/etc/caddy/Caddyfile</code>，然后执行 <code>sudo systemctl reload caddy</code>。</li><li>确认这台电脑能免密 SSH 登录服务器（<code>ssh {draft?.sshUser || 'user'}@{draft?.sshHost || 'server'}</code>）。</li></ol>
+      <ol><li>确认服务器已安装 Caddy，并把域名解析到服务器 IP。</li><li>把下面的配置写入 <code>/etc/caddy/Caddyfile</code>，然后执行 <code>sudo systemctl reload caddy</code>。</li><li>确认这台电脑能 SSH 登录服务器（<code>ssh {draft?.sshUser || 'user'}@{draft?.sshHost || 'server'}</code>）：配置密钥，或在上面填写 SSH 密码。</li></ol>
       <pre>{remote?.caddy}</pre>
       <button className="text-button" onClick={() => remote && void copyToClipboard(remote.caddy).then(() => notify('已复制 Caddy 配置'))}><Copy size={13} />复制配置</button>
     </details>

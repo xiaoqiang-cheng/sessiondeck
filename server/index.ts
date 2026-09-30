@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { statSync, existsSync, mkdirSync } from 'node:fs';
+import { statSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { chmod, rename, unlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -13,7 +13,7 @@ import { ShellTerminals } from './shell-terminals.ts';
 import { allowedRemoteRequest, allowedRequest, readCookie, validToken } from './security.ts';
 import { AuthStore, type Principal } from './auth.ts';
 import { authorize } from './access.ts';
-import { caddyConfig, DEFAULT_REMOTE, normalizeRemote, Tunnel } from './remote.ts';
+import { caddyConfig, DEFAULT_REMOTE, normalizeRemote, SecretBox, secretKey, Tunnel } from './remote.ts';
 import type { AuthStatus, RemoteSettings, RemoteStatus, ShareMode } from '../shared/auth.ts';
 import { demoBackends, seedDemo, demoCommand } from './demo.ts';
 import { getBackendInfo, buildLaunch, discoverSessions, resolveNativeSessionId, validateNativeId, findExecutable } from './adapters.ts';
@@ -54,10 +54,20 @@ const LOCAL_OWNER: Principal = { kind: 'owner', local: true };
 // server's loopback and the reverse proxy there terminates TLS.
 const envRemotePort = process.env.SESSIONDECK_REMOTE_PORT ? Number(process.env.SESSIONDECK_REMOTE_PORT) : null;
 if (envRemotePort !== null && (!Number.isInteger(envRemotePort) || envRemotePort < 1024 || envRemotePort > 65535 || envRemotePort === port)) throw new Error('SESSIONDECK_REMOTE_PORT 必须是与 Web 端口不同的 1024–65535 端口');
-function remoteSettings(): RemoteSettings {
-  return { ...DEFAULT_REMOTE, localPort: envRemotePort ?? port + 1, ...auth.setting<Partial<RemoteSettings>>('remote'), ...(envRemotePort ? { localPort: envRemotePort } : {}) };
+// A random key file beside the database seals the saved SSH password.
+const secretKeyFile = join(dataDir, 'secret.key');
+if (!existsSync(secretKeyFile)) writeFileSync(secretKeyFile, randomBytes(32), { mode: 0o600, flag: 'wx' });
+const secrets = new SecretBox(secretKey(readFileSync(secretKeyFile)));
+function sshPassword(): string | null {
+  const sealed = auth.setting<string>('remote-ssh-password');
+  if (!sealed) return null;
+  try { return secrets.open(sealed); } catch { return null; }
 }
-const tunnel = new Tunnel();
+function remoteSettings(): RemoteSettings {
+  const { hasPassword: _stale, ...saved } = auth.setting<Partial<RemoteSettings>>('remote') ?? {};
+  return { ...DEFAULT_REMOTE, localPort: envRemotePort ?? port + 1, ...saved, ...(envRemotePort ? { localPort: envRemotePort } : {}), hasPassword: !!auth.setting('remote-ssh-password') };
+}
+const tunnel = new Tunnel(dataDir);
 const terminals = new Terminals();
 const shells = new ShellTerminals();
 const nativeStatus = new NativeStatusWatcher();
@@ -386,13 +396,18 @@ async function applyRemote() {
       remoteServer.listen(settings.localPort, '127.0.0.1', () => { remoteServer.off('error', failed); accept(); });
     });
   }
-  await tunnel.configure(settings.enabled && remoteServer.listening ? settings : null);
+  await tunnel.configure(settings.enabled && remoteServer.listening ? settings : null, sshPassword());
 }
 app.get('/api/remote', (_req, res) => res.json(remoteStatus()));
 app.post('/api/remote', async (req, res) => {
   const next = normalizeRemote(req.body, remoteSettings());
   if (next.localPort === port) fail('远程监听端口不能与本机 Web 端口相同');
-  const { localPort, ...saved } = next;
+  // The password is write-only: omitted keeps it, '' clears it.
+  if (typeof req.body.sshPassword === 'string') {
+    if (req.body.sshPassword) auth.setSetting('remote-ssh-password', secrets.seal(req.body.sshPassword));
+    else auth.setSetting('remote-ssh-password', null);
+  }
+  const { localPort, hasPassword: _hasPassword, ...saved } = next;
   auth.setSetting('remote', envRemotePort ? saved : { ...saved, localPort });
   await applyRemote();
   res.json(remoteStatus());
