@@ -255,3 +255,8 @@
 - 新增 `scripts/install-service.sh`：写入 `~/.config/systemd/user/sessiondeck.service`（`ExecStart=start.sh`，SIGTERM 到达 Node 走现有优雅关闭，`Restart=on-failure`），`daemon-reload`、`systemd-analyze verify`，并启用 linger。已在本机执行：单元已安装、`inactive`、linger 已开，正在运行的实例未受影响。
 - 新增 `scripts/restart-service.sh`：用 `setsid nohup` 在独立会话后台执行，因此从 SessionDeck 底部 Shell 发起也不会被服务关闭时的进程树回收打断。只停止「监听该端口、命令行含 server/index.ts、cwd 为本项目」的进程；若已由 systemd 管理则直接 `systemctl --user restart`。旧实例退出后 `enable --now` 新单元。日志 `/tmp/sessiondeck-restart.log`。
 - 未替用户执行重启：这会终止包括本会话在内的所有 Agent 会话（可从卡片恢复）。README 增加说明。
+
+## 2026-09-30：对话记录页去掉冗余说明
+
+- 对话记录页原有四块固定文字：标题栏「Claude 对话记录 · 只读 · 刷新记录」、引导栏「查看这个会话已保存的用户输入与回复……进入原生终端」、截断提示「这里只显示最近一部分记录……」、页脚「N 条消息 · 更新于 HH:MM · 回到最新消息」。合并为一行 34px 的工具栏：消息数、截断说明（灰色小字，窄屏隐藏，悬停可见全文）、同步时间，右侧「回到最新消息」（仅离开底部时出现）、刷新和进入终端两个图标按钮。后端名称已由会话头部的视图切换标出，不再重复。
+- 更新对应断言；`conversation.spec` 与 `codex-chat.spec` 共 12 项通过。截图 `artifacts/conversation-compact.png`。

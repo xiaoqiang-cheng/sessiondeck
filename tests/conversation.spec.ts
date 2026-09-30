@@ -39,7 +39,7 @@ test('conversation history is read-only, recovers from failed refresh and switch
   await expect(page.locator('.conversation-text').first()).toHaveText(history.messages[0].text);
   await expect(page.locator('.conversation-text').last()).toHaveText(history.messages[1].text);
   await expect(page.locator('.conversation-pane img')).toHaveCount(0);
-  await expect(page.locator('.conversation-pane')).toContainText('完整上下文请在原生终端中查看');
+  await expect(page.locator('.conversation-pane')).toContainText('最近部分，完整上下文请在原生终端中查看');
   await expect(page.locator('.conversation-pane textarea')).toHaveCount(0);
   await page.screenshot({ path: 'artifacts/conversation-desktop.png' });
   fail = true;

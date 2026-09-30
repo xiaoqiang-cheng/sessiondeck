@@ -132,18 +132,19 @@ export default function ConversationPane({ session, onTerminal, onSelection }: {
   };
 
   return <section className="conversation-pane" aria-label="原生对话记录">
+    {/* One quiet row: what this is, how much is shown, and the two actions. The
+        view switch in the session header already names the backend. */}
     <header className="conversation-toolbar">
-      <div className="conversation-source"><MessageSquare size={15} /><span>{backendName[session.backend]} 对话记录</span>
-        <span className="conversation-readonly">只读</span></div>
-      <button className="button secondary small-button" disabled={isLoading || refreshing} onClick={() => refresh.current(true)}>
-        <RefreshCw size={13} className={isLoading || refreshing ? 'spin' : undefined} />{refreshing ? '刷新中' : '刷新记录'}
-      </button>
+      <span className="conversation-source" title={transcript?.notice || (transcript?.truncated ? '只显示最近一部分记录，完整上下文请在原生终端中查看' : '只读 · 发送消息、工具详情和审批请使用原生终端')}>
+        <MessageSquare size={13} />{transcript && !empty ? `${transcript.messages.length} 条` : '记录'}{transcript?.truncated && !transcript.notice && <em>（最近部分，完整上下文请在原生终端中查看）</em>}{transcript?.notice && <em>（{transcript.notice}）</em>}{current && <time dateTime={current.syncedAt.toISOString()}>{current.syncedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>}
+      </span>
+      <span className="conversation-actions">
+        {!atBottom && !empty && <button className="text-button" onClick={scrollToBottom}><ArrowDownToLine size={13} />回到最新消息</button>}
+        <button className="icon-button" aria-label="刷新记录" title="刷新记录" disabled={isLoading || refreshing} onClick={() => refresh.current(true)}><RefreshCw size={14} className={isLoading || refreshing ? 'spin' : undefined} /></button>
+        <button className="icon-button" aria-label="进入原生终端" title="进入原生终端" onClick={onTerminal}><TerminalSquare size={14} /></button>
+      </span>
     </header>
-    <div className="conversation-guidance"><span>查看这个会话已保存的用户输入与回复。发送消息、工具详情和审批请使用原生终端。</span>
-      <button className="text-button" onClick={onTerminal}><TerminalSquare size={14} />进入原生终端</button></div>
     {error && <div className="conversation-error" role="alert"><span>{error}</span><button className="text-button" disabled={refreshing} onClick={() => refresh.current(true)}>重试读取</button></div>}
-    {transcript?.notice && <p className="conversation-notice">{transcript.notice}</p>}
-    {transcript?.truncated && !transcript.notice && <p className="conversation-notice">这里只显示最近一部分记录，完整上下文请在原生终端中查看。</p>}
     <div className="conversation-scroller" ref={scroller} tabIndex={0} aria-label="会话消息" onScroll={(event) => {
       const element = event.currentTarget;
       const next = element.scrollHeight - element.scrollTop - element.clientHeight < 64;
@@ -158,7 +159,5 @@ export default function ConversationPane({ session, onTerminal, onSelection }: {
             <div className="conversation-text">{message.text}</div>
           </li>)}</ol>}
     </div>
-    <footer className="conversation-footer"><span>{transcript && !empty ? `${transcript.messages.length} 条消息` : '原生会话历史'}{current && <> · 更新于 {current.syncedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</>}</span>
-      {!atBottom && !empty && <button className="text-button" onClick={scrollToBottom}><ArrowDownToLine size={14} />回到最新消息</button>}</footer>
   </section>;
 }
