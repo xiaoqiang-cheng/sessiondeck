@@ -248,3 +248,10 @@
 - SessionDeck 生成的 Caddy 模板加上 `flush_interval -1` 和"不要整站 encode"的说明，并有单元断言。
 - 兜底：服务端心跳从注释改为 `event: ping`（浏览器可观察）；客户端若 45 秒没有任何事件且页面可见，每 15 秒轮询完整状态，直到推送恢复。正式服务重启前没有 ping 事件，安静时会多一些轮询，无害。
 - `npm run verify`：179 项后端、67 项浏览器通过；`auth.test.ts` 新增模板断言后 6 项通过。
+
+## 2026-09-30：远程重启服务
+
+- 正式实例由 tmux 里的 zsh 前台运行（pid 428380），承载着当前这个 Claude 会话；远程用户没有 tmux 可用，也不能从被托管的 Shell 里直接停它（Shell 会随服务一起被回收）。
+- 新增 `scripts/install-service.sh`：写入 `~/.config/systemd/user/sessiondeck.service`（`ExecStart=start.sh`，SIGTERM 到达 Node 走现有优雅关闭，`Restart=on-failure`），`daemon-reload`、`systemd-analyze verify`，并启用 linger。已在本机执行：单元已安装、`inactive`、linger 已开，正在运行的实例未受影响。
+- 新增 `scripts/restart-service.sh`：用 `setsid nohup` 在独立会话后台执行，因此从 SessionDeck 底部 Shell 发起也不会被服务关闭时的进程树回收打断。只停止「监听该端口、命令行含 server/index.ts、cwd 为本项目」的进程；若已由 systemd 管理则直接 `systemctl --user restart`。旧实例退出后 `enable --now` 新单元。日志 `/tmp/sessiondeck-restart.log`。
+- 未替用户执行重启：这会终止包括本会话在内的所有 Agent 会话（可从卡片恢复）。README 增加说明。
