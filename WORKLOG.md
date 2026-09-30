@@ -205,3 +205,11 @@
 - 原因：终端一直开启 xterm 的 `screenReaderMode`，它会禁用 xterm 的 `input` 事件路径。桌面端 fcitx/ibus 提交中文时会附带 keydown 229，xterm 靠它比对 textarea 才能拿到文字；iOS 键盘没有这个 keydown，只发 `input` 事件，于是被丢弃。微信等第三方键盘走的是合成事件加整字段重写，`insertText` 也不出现。
 - 修复：触屏设备（`pointer: coarse`）关闭 `screenReaderMode`，桌面保持不变以保留无障碍树和现有测试。触屏设备上由我们接管 textarea：合成结束、或没有 keydown 支撑的 input 事件到来时，把字段中的文字整体发送并清空；有 keydown 的普通按键仍由 xterm 处理，避免重复发送。
 - 验证：`tests/terminal-ime.spec.ts` 新增触屏用例，回放 iOS 原生键盘（仅 input 事件）和微信式键盘（composition 事件加字段重写）两条路径；修复前该用例失败（`你好` 未发出），修复后通过，普通按键仍只发送一次。Playwright WebKit 因缺少系统库无法运行，用 Chromium 触屏上下文模拟，真机行为待用户确认。
+
+## 2026-09-30：手机端原生终端改用输入栏，修复中文重复发送
+
+- 上一版在触屏设备上关闭 `screenReaderMode` 并额外监听 textarea 事件，导致 xterm 与我们的监听各发一次，中文全部重复（用户消息里每个词都出现两遍）。已撤回这两处改动，恢复 xterm 原有路径。
+- 参照 Codex 图形对话，在原生终端下方加入输入栏：普通 textarea（任何键盘的中文都能正常输入）、发送按钮，以及 Esc、Tab、↑、↓、Ctrl+C、回车快捷键。回车发送、Shift+回车换行；多行内容通过 xterm `paste()` 以括号粘贴整体送入，随后单独发送回车，避免第一行提前提交。触屏设备默认显示，桌面可在终端工具栏用键盘图标开关。
+- 触屏设备上把 xterm 隐藏 textarea 设为 `inputmode="none"`：点终端不再弹出系统键盘，所有文字只经输入栏进入，从根源上避免重复。
+- `tests/terminal-ime.spec.ts` 触屏用例改为通过输入栏验证：中文与多行内容各只发送一次、随后跟一个回车，快捷键按钮发送对应控制序列；桌面输入法用例不变。手机截图 `artifacts/terminal-composer-mobile.png`。
+- 为 Claude 做与 Codex 相同的完整图形对话需要另一条原生协议（Agent SDK），本轮不做。

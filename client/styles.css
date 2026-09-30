@@ -709,3 +709,17 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
   .share-form-row { grid-template-columns: minmax(0, 1fr); }
 }
 .backend-settings + .backend-settings { margin-top: 12px; }
+
+/* ——— Terminal composer: a normal textarea for phones and IMEs ——— */
+.terminal-composer { flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px; background: #1c1f26; border-top: 1px solid #2a2f39; }
+.terminal-quick-keys { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.terminal-quick-keys::-webkit-scrollbar { display: none; }
+.terminal-quick-keys button { flex-shrink: 0; min-width: 40px; height: 28px; padding: 0 10px; border-radius: 6px; background: #2a2f39; color: #e6e7ea; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.terminal-quick-keys button:hover:not(:disabled) { background: #3b4250; }
+.terminal-composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.terminal-composer-row textarea { flex: 1; min-height: 38px; max-height: 120px; padding: 9px 12px; border: 1px solid #2a2f39; border-radius: 10px; background: #16181d; color: #e6e7ea; font-size: 14px; line-height: 1.4; resize: none; field-sizing: content; }
+.terminal-composer-row textarea::placeholder { color: #6e7480; }
+.terminal-composer-row textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.terminal-send { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 38px; height: 38px; border-radius: 10px; background: var(--accent); color: #fff; }
+.terminal-send:hover:not(:disabled) { background: var(--accent-dark); }
+@media (max-width: 720px) { .terminal-composer { padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); } }

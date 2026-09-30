@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ArrowDownToLine, Copy, Check, ImagePlus, LoaderCircle, Maximize2, Minimize2, WifiOff, X } from 'lucide-react';
+import { ArrowDownToLine, Copy, Check, ImagePlus, Keyboard, LoaderCircle, Maximize2, Minimize2, Send, WifiOff, X } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import { getToken, uploadTerminalImage } from './api';
 import { MAX_TERMINAL_IMAGE_BYTES, TERMINAL_IMAGE_TYPES } from '../shared/terminal-images';
+
+const touchDevice = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches;
 
 export default function TerminalPane({ sessionId, running, status, allowImages: imagesRequested, onSelection, channel = 'session', onExit, focusRequest, readOnly: readOnlyRequested = false }: {
   sessionId: string; running: boolean; status?: string; allowImages?: boolean; onSelection: (text: string) => void;
@@ -21,6 +23,13 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  // A plain textarea, like the Codex chat composer: every keyboard can type
+  // Chinese into it. Default on touch devices; a toolbar toggle elsewhere.
+  const [composerOpen, setComposerOpen] = useState(touchDevice);
+  const [draft, setDraft] = useState('');
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const acceptsInputRef = useRef(false);
   const [terminalId, setTerminalId] = useState<string | null>(null);
   const [imageStatus, setImageStatus] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -40,22 +49,19 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     if (!containerRef.current) return;
     let disposed = false;
     let socket: WebSocket | null = null;
+    socketRef.current = null;
     let reconnect: ReturnType<typeof setTimeout> | undefined;
     let everConnected = false;
     let attempts = 0;
     let acceptsInput = running && !readOnlyRequested;
+    acceptsInputRef.current = acceptsInput;
     setConnected(false); setError(''); setCopied(false);
     terminalIdRef.current = null; setTerminalId(null); setImageStatus('');
     uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; setUploadingImage(false);
     selectionRef.current('');
-    // xterm's screenReaderMode suppresses its `input` event path, which is the
-    // only way iOS keyboards commit Chinese (there is no keydown 229 there,
-    // unlike fcitx/ibus on desktop). Keep the accessibility tree for desktop
-    // screen readers and tests; on touch devices use the plain input path.
-    const touchDevice = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches;
     const terminal = new Terminal({
       cursorBlink: true, fontSize: 13, lineHeight: 1.25, scrollback: 8000,
-      disableStdin: true, screenReaderMode: !touchDevice,
+      disableStdin: true, screenReaderMode: true,
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
       theme: {
         background: '#16181d', foreground: '#e6e7ea', cursor: '#e6e7ea',
@@ -79,43 +85,12 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
       return true;
     });
     terminal.textarea?.setAttribute('aria-label', channel === 'shell' ? 'Shell 终端输入' : '原生会话终端输入');
-    // Mobile keyboards commit IME text in ways xterm's keydown-driven path
-    // never sees: iOS Pinyin as a bare `input` event, WeChat/Sogou keyboards
-    // through composition events or by rewriting the whole textarea. On touch
-    // devices we own the textarea instead: when a composition ends, or an
-    // input event lands with no keydown behind it, send whatever text the
-    // keyboard put in the field and clear it. Desktop keeps xterm's path.
-    const textarea = terminal.textarea;
-    let keyDownSeen = false;
-    let composing = false;
-    const onKeyDown = () => { keyDownSeen = true; };
-    const onKeyUp = () => { keyDownSeen = false; };
-    const flushTextarea = () => {
-      if (!textarea || !textarea.value) return;
-      const text = textarea.value;
-      textarea.value = '';
-      if (!acceptsInput || uploadingRef.current || socket?.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify({ type: 'input', data: text }));
-    };
-    const onCompositionStart = () => { composing = true; };
-    const onCompositionEnd = () => {
-      composing = false;
-      // The IME writes the committed text after this event fires.
-      setTimeout(flushTextarea, 0);
-    };
-    const onInput = (event: Event) => {
-      if (composing || keyDownSeen) return;
-      const input = event as InputEvent;
-      if (input instanceof InputEvent && (input.isComposing || (input.inputType && input.inputType !== 'insertText' && input.inputType !== 'insertReplacementText' && input.inputType !== 'insertFromPaste'))) return;
-      flushTextarea();
-    };
-    if (touchDevice) {
-      textarea?.addEventListener('keydown', onKeyDown);
-      textarea?.addEventListener('keyup', onKeyUp);
-      textarea?.addEventListener('compositionstart', onCompositionStart);
-      textarea?.addEventListener('compositionend', onCompositionEnd);
-      textarea?.addEventListener('input', onInput);
-    }
+    // Mobile keyboards (iOS Pinyin, WeChat, Sogou) commit text in ways xterm's
+    // keydown-driven path cannot follow, and any second listener on its
+    // textarea sends everything twice. On touch devices text goes through the
+    // composer below instead; the hidden textarea keeps focus for the caret
+    // and hardware keys but never raises the on-screen keyboard.
+    if (touchDevice) terminal.textarea?.setAttribute('inputmode', 'none');
     terminalRef.current = terminal;
     fitRef.current = fit;
     function resize() {
@@ -147,6 +122,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
         if (disposed) return;
         const path = channel === 'shell' ? `/api/shells/${encodeURIComponent(sessionId)}/terminal` : `/api/terminal/${encodeURIComponent(sessionId)}`;
         socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}?token=${encodeURIComponent(token)}`);
+        socketRef.current = socket;
         socket.onopen = () => {
           if (disposed) { socket?.close(); return; }
           if (everConnected) terminal.reset();
@@ -164,16 +140,18 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
               terminalIdRef.current = typeof message.terminalId === 'string' ? message.terminalId : null;
               setTerminalId(terminalIdRef.current);
               if (message.readOnly === true) { acceptsInput = false; terminal.options.disableStdin = true; }
+              acceptsInputRef.current = acceptsInput;
               setServerReadOnly(message.readOnly === true);
               if (channel === 'shell' && typeof message.running === 'boolean') {
                 acceptsInput = message.running;
+                acceptsInputRef.current = acceptsInput;
                 terminal.options.disableStdin = !acceptsInput;
                 if (!acceptsInput) exitRef.current?.(message.exitCode ?? 0);
               }
             }
             if (message.type === 'error') setError(message.message || message.error || '终端连接遇到问题');
             if (message.type === 'exit') {
-              acceptsInput = false; terminal.options.disableStdin = true;
+              acceptsInput = false; acceptsInputRef.current = false; terminal.options.disableStdin = true;
               terminal.write(`\r\n\x1b[90m[进程已退出 · ${message.exitCode ?? 0}]\x1b[0m\r\n`);
               exitRef.current?.(message.exitCode ?? 0);
             }
@@ -197,7 +175,6 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     void connect();
     return () => {
       disposed = true; clearTimeout(reconnect); clearTimeout(copiedTimer.current); uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; socket?.close(); input.dispose(); selection.dispose();
-      textarea?.removeEventListener('keydown', onKeyDown); textarea?.removeEventListener('keyup', onKeyUp); textarea?.removeEventListener('compositionstart', onCompositionStart); textarea?.removeEventListener('compositionend', onCompositionEnd); textarea?.removeEventListener('input', onInput);
       resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
     };
   }, [sessionId, running, channel, readOnlyRequested]);
@@ -262,6 +239,23 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     if (file) void stageImage(file);
   }
 
+  const sendRaw = (data: string) => {
+    const socket = socketRef.current;
+    if (!acceptsInputRef.current || uploadingRef.current || socket?.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify({ type: 'input', data }));
+    return true;
+  };
+  const sendDraft = () => {
+    const text = draft;
+    if (!text.trim() || !terminalRef.current) return;
+    // paste() honours bracketed paste, so multi-line text lands as one block
+    // instead of the first line submitting early; Enter follows separately.
+    terminalRef.current.paste(text.replace(/\r?\n$/, ''));
+    setDraft('');
+    window.setTimeout(() => sendRaw('\r'), 40);
+    composerRef.current?.focus();
+  };
+  const quickKeys: [string, string, string][] = [['Esc', '\x1b', '发送 Esc'], ['Tab', '\t', '发送 Tab'], ['↑', '\x1b[A', '上一条'], ['↓', '\x1b[B', '下一条'], ['^C', '\x03', '发送 Ctrl+C'], ['⏎', '\r', '发送回车']];
   const toggleLabel = fullscreen ? '退出全屏' : '全屏';
   return <div className={`terminal-pane ${fullscreen ? 'fullscreen' : ''}`} onPasteCapture={onPasteCapture}>
     <div className="terminal-toolbar">{readOnly && <span className="terminal-readonly">只读查看</span>}<span title={connected ? '浏览器已连接终端通道；任务是否执行请查看会话状态' : '正在连接终端通道'} className={`terminal-connection ${connected ? 'connected' : ''}`}><i />{connected ? '已连接' : '连接中'}</span><div>
@@ -272,12 +266,20 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
         try { await navigator.clipboard.writeText(selected); setCopied(true); setError(''); clearTimeout(copiedTimer.current); copiedTimer.current = setTimeout(() => setCopied(false), 1800); }
         catch { setError('浏览器无法访问剪贴板，请使用系统复制快捷键'); }
       }}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>
+      {channel === 'session' && <button title={composerOpen ? '隐藏输入栏' : '显示输入栏（适合手机和中文输入）'} aria-label={composerOpen ? '隐藏输入栏' : '显示输入栏'} aria-pressed={composerOpen} onClick={() => setComposerOpen(value => !value)}><Keyboard size={14} /></button>}
       <button title="回到终端底部" aria-label="回到终端底部" onClick={() => { terminalRef.current?.scrollToBottom(); terminalRef.current?.focus(); }}><ArrowDownToLine size={14} /></button>
       <button title={`${toggleLabel}（Ctrl / ⌘ + Shift + Enter）`} aria-label={toggleLabel} aria-pressed={fullscreen} onClick={() => setFullscreen((value) => !value)}>{fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
     </div></div>
     {imageStatus && <div className="terminal-image-status" role="status" aria-live="polite"><ImagePlus size={14} /><span>{imageStatus}</span>{uploadingImage && <LoaderCircle className="spin" size={13} />}</div>}
     {error && <div className="terminal-error" role="alert"><WifiOff size={14} /><span>{error}</span><button className="terminal-dismiss" aria-label="关闭终端提示" onClick={() => setError('')}><X size={13} /></button></div>}
     <div ref={containerRef} className="terminal-container" />
+    {composerOpen && channel === 'session' && !readOnly && <div className="terminal-composer">
+      <div className="terminal-quick-keys" role="group" aria-label="快捷按键">{quickKeys.map(([label, data, title]) => <button key={label} type="button" title={title} aria-label={title} disabled={!connected || !running} onClick={() => { sendRaw(data); composerRef.current?.focus(); }}>{label}</button>)}</div>
+      <div className="terminal-composer-row">
+        <textarea ref={composerRef} aria-label="终端输入栏" placeholder={running ? '输入内容，回车发送；Shift+回车换行' : '启动会话后可以输入'} rows={1} value={draft} disabled={!connected || !running} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendDraft(); } }} />
+        <button type="button" className="terminal-send" aria-label="发送到终端" title="发送到终端（回车）" disabled={!connected || !running || !draft.trim()} onClick={sendDraft}><Send size={15} /></button>
+      </div>
+    </div>}
     {!running && <div className="terminal-hint">{channel === 'shell' ? 'Shell 已退出，可以关闭此终端或新建一个。' : '启动会话后，在这里使用原生 CLI。'}</div>}
   </div>;
 }
