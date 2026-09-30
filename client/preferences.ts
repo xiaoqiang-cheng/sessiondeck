@@ -40,7 +40,7 @@ export function useContactFilters(view: View) {
 export function useContactSort() {
   const [sort, setSort] = useState<ContactSort>(() => {
     const saved = readLocalPreference('sessiondeck.contact-sort');
-    return saved === 'name' || saved === 'activity' ? saved : 'created';
+    return saved === 'name' || saved === 'created' ? saved : 'activity';
   });
   return [sort, (next: ContactSort) => { writeLocalPreference('sessiondeck.contact-sort', next); setSort(next); }] as const;
 }

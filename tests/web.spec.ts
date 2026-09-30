@@ -304,7 +304,7 @@ test('contact sorting and filters persist across reload with separate filters fo
   await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await page.locator('.backend-tabs').getByRole('button', { name: 'Codex', exact: true }).click();
   await page.getByLabel('按状态筛选').selectOption('idle');
-  await expect(page.locator('.session-card h3')).toHaveText(['Z 排序置顶', 'B 排序联系人', 'A 排序联系人']);
+  await expect(page.locator('.session-card h3')).toHaveText(['Z 排序置顶', 'A 排序联系人', 'B 排序联系人']);
   await page.getByLabel('联系人排序').selectOption('name');
   await expect(page.locator('.session-card h3')).toHaveText(['Z 排序置顶', 'A 排序联系人', 'B 排序联系人']);
   await page.getByLabel('联系人排序').selectOption('created');
@@ -332,7 +332,8 @@ test('contact sorting and filters persist across reload with separate filters fo
 
 test('keyboard help is discoverable and workspace shortcuts do not steal typing focus', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: '使用说明与快捷键', exact: true }).click();
+  await page.getByRole('button', { name: '更多', exact: true }).click();
+  await page.getByRole('menuitem', { name: '使用说明与快捷键', exact: true }).click();
   const help = page.getByRole('dialog', { name: '使用说明与快捷键' });
   await expect(help.getByText('如何理解状态', { exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
@@ -582,10 +583,10 @@ test('the "需要你处理" badge counts unread reminders, matching the red badg
   await mockWorkspace(page, state => {
     const seed = state.sessions[0];
     state.sessions = [
-      { ...seed, id: 'seen-waiting', title: '已看过但仍在等待', groupId: null, archived: false, pinned: false, running: true, status: 'waiting_input', unread: 0, createdAt: '2026-01-01T00:00:00Z' },
-      { ...seed, id: 'stale-running', title: '曾提醒但已在运行', groupId: null, archived: false, pinned: true, running: true, status: 'running', unread: 1, createdAt: '2026-01-02T00:00:00Z' },
-      { ...seed, id: 'unseen-waiting', title: '等待且未读', groupId: null, archived: false, pinned: false, running: true, status: 'waiting_approval', unread: 2, createdAt: '2026-01-03T00:00:00Z' },
-      { ...seed, id: 'archived-unseen', title: '已归档的未读', groupId: null, archived: true, pinned: false, running: false, status: 'error', unread: 1, createdAt: '2026-01-04T00:00:00Z' },
+      { ...seed, id: 'seen-waiting', title: '已看过但仍在等待', groupId: null, archived: false, pinned: false, running: true, status: 'waiting_input', unread: 0, lastActivity: '2026-01-04T00:00:00Z' },
+      { ...seed, id: 'stale-running', title: '曾提醒但已在运行', groupId: null, archived: false, pinned: true, running: true, status: 'running', unread: 1, lastActivity: '2026-01-01T00:00:00Z' },
+      { ...seed, id: 'unseen-waiting', title: '等待且未读', groupId: null, archived: false, pinned: false, running: true, status: 'waiting_approval', unread: 2, lastActivity: '2026-01-02T00:00:00Z' },
+      { ...seed, id: 'archived-unseen', title: '已归档的未读', groupId: null, archived: true, pinned: false, running: false, status: 'error', unread: 1, lastActivity: '2026-01-03T00:00:00Z' },
     ];
   });
   await page.goto('/');
@@ -596,8 +597,8 @@ test('the "需要你处理" badge counts unread reminders, matching the red badg
   const attentionTab = nav.getByRole('button', { name: /^需要你处理/ });
   await expect(attentionTab.locator('b')).toHaveText('1');
   await expect(page).toHaveTitle(/^\(1\) /);
-  // Pinned first, then blocked sessions, then the merely running.
-  await expect(page.locator('.session-card h3')).toHaveText(['曾提醒但已在运行', '等待且未读', '已看过但仍在等待']);
+  // Pinned first, then blocked sessions (most recent activity first), then the merely running.
+  await expect(page.locator('.session-card h3')).toHaveText(['曾提醒但已在运行', '已看过但仍在等待', '等待且未读']);
   await attentionTab.click();
   await expect(page.locator('.session-card h3')).toHaveText(['等待且未读']);
 });

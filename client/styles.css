@@ -92,6 +92,10 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .topbar-actions .search-field { width: 190px; height: 32px; margin-right: 2px; }
 .topbar-actions .search-field input { width: 100%; }
 .topbar-actions .button { margin-left: 8px; height: 32px; }
+.topbar-actions .new-contact { width: 32px; padding: 0; justify-content: center; border-radius: 9px; }
+.more-menu { position: relative; }
+.more-menu .dropdown-menu { right: 0; left: auto; top: 38px; }
+.more-menu .dropdown-menu button.active { color: var(--accent); }
 .connection-indicator { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 30px; }
 .connection-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
 .connection-dot.online { background: var(--green); }
@@ -604,14 +608,28 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
   .group-message { max-width: 92%; }
 }
 @media (max-width: 720px) {
-  .topbar-row { flex-wrap: wrap; height: auto; padding: 8px 12px; row-gap: 6px; }
-  .nav-scroller { order: 3; flex-basis: 100%; }
+  /* App-like on a phone: the bar clears the status bar and notch, the nav
+     scrolls in one row beneath it, and the body never rubber-bands. */
+  .topbar-row { flex-wrap: wrap; height: auto; padding: calc(6px + env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left)); row-gap: 4px; }
+  .nav-scroller { order: 3; flex-basis: 100%; padding-bottom: 2px; }
+  .primary-nav button, .group-nav button { height: 30px; padding: 0 9px; font-size: 13px; }
   .topbar-actions { margin-left: auto; min-width: 0; }
   .topbar-actions .search-field { width: auto; flex: 1; min-width: 60px; }
-  .topbar-actions .icon-button[aria-label="导入会话"], .topbar-actions .icon-button[aria-label="使用说明与快捷键"] { display: none; }
+  .topbar-actions .connection-indicator, .demo-badge { display: none; }
+  .app-shell { height: 100dvh; min-height: -webkit-fill-available; }
+  .app-body { padding-bottom: env(safe-area-inset-bottom); }
+  .main-content { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  .session-tabs { height: 40px; }
+  .session-tab>button[role="tab"] { font-size: 13px; padding-left: 14px; }
+  .session-tab-close { width: 28px; height: 28px; opacity: 1; }
+  .session-card { padding: 12px 14px; border-radius: 12px; }
+  .card-pin { opacity: 1; }
+  .terminal-toolbar { height: 38px; }
+  .terminal-toolbar button { width: 34px; height: 34px; }
+  .icon-button { width: 36px; height: 36px; }
+  .button.small-button { height: 32px; }
   .filter-popover { position: fixed; top: auto; left: 12px; right: 12px; width: auto; }
   .contact-grid { grid-template-columns: minmax(0, 1fr); }
-  .modal-overlay { padding: 0; }
   .drawer-header { padding: 6px 10px; }
   .drawer-title { max-width: none; }
   .session-meta { display: none; }
@@ -620,8 +638,10 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
   .terminal-dock-body { padding: 5px; gap: 5px; }
   .terminal-dock-tab>button:first-child { max-width: 130px; }
   .session-drawer>.error-banner, .session-drawer>.session-status-detail, .session-drawer>.session-unread-notice { margin: 8px 8px 0; }
-  .modal-overlay { padding: 12px; }
-  .modal { max-height: calc(100dvh - 24px); }
+  .modal-overlay { padding: 0; align-items: flex-end; }
+  /* Modals rise from the bottom like a sheet and stay clear of the home bar. */
+  .modal { width: 100%; max-height: calc(100dvh - 24px); border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom); animation: sheetUp .2s ease; }
+  @keyframes sheetUp { from { transform: translateY(24px); opacity: 0; } }
   .modal-heading { padding: 18px 16px 14px 18px; }
   .modal-fields { padding: 0 18px 18px; }
   .modal-footer { padding: 12px 18px; }
@@ -727,3 +747,11 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .terminal-send:hover:not(:disabled) { background: var(--accent-dark); }
 @media (max-width: 720px) { .terminal-composer { padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); } }
 @media (pointer: coarse) { .terminal-container { touch-action: none; overscroll-behavior: contain; } }
+
+/* Installed to the home screen: no browser chrome, so the page itself is the app. */
+@media (display-mode: standalone) {
+  body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  input, textarea, .terminal-container, .conversation-text, .chat-markdown, .workspace-preview, .diff-view, code, pre { -webkit-user-select: text; user-select: text; }
+  .topbar { -webkit-app-region: drag; }
+  .topbar button, .topbar input, .topbar a { -webkit-app-region: no-drag; }
+}

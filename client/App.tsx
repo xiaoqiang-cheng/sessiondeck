@@ -87,7 +87,7 @@ function HelpDialog({ close }: { close: () => void }) {
       <h3>如何理解状态</h3>
       <ul className="status-guide"><li><span className="status-badge running">运行中</span><span>后端正在执行任务。</span></li><li><span className="status-badge waiting">等待输入 / 审批</span><span>需要你进入会话回复或决定。</span></li><li><span className="status-badge idle">空闲 / 已停止</span><span>当前没有执行任务；不代表工作已验收。</span></li><li><span className="status-badge unknown">状态未知</span><span>目前没有足够信息确认状态，进入原生会话查看。</span></li></ul>
       <p>标有“估测”的状态来自终端输出。卡片上的提醒、来源说明和原生会话可帮助你判断；断线时保留最后收到的状态。</p>
-      <h3>保留你的工作方式</h3><p>置顶联系人始终在最前；然后是等待输入、审批或出现异常的会话，再是正在运行的会话；其余默认按创建时间，也可改为最近活动或名称。有新提醒的卡片会轻轻跳动并发光，打开会话后消失。每个页面独立保存搜索和筛选，刷新后继续使用；Fork 继承上下文，原联系人保留。</p>
+      <h3>保留你的工作方式</h3><p>置顶联系人始终在最前；然后是等待输入、审批或出现异常的会话，再是正在运行的会话；其余默认按最近活动，也可改为创建时间或名称。有新提醒的卡片会轻轻跳动并发光，打开会话后消失。每个页面独立保存搜索和筛选，刷新后继续使用；Fork 继承上下文，原联系人保留。</p>
     </div><div className="modal-footer"><button className="button primary" onClick={close}>知道了</button></div>
   </ModalShell>;
 }
@@ -457,7 +457,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   }).sort((a, b) => {
     // Like a chat list: pinned stays on top; then whoever is waiting on you;
     // then ones still working; the rest by the chosen order, where the
-    // default is newest first.
+    // default is most recent activity first.
     if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
     if (attention(a) !== attention(b)) return Number(attention(b)) - Number(attention(a));
     if (a.running !== b.running) return Number(b.running) - Number(a.running);
@@ -522,15 +522,17 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
             <FilterMenu active={backendFilter !== 'all' || statusFilter !== 'all'} reset={() => { setBackendFilter('all'); setStatusFilter('all'); }}>
               <div className="filter-group"><span>后端</span><div className="backend-tabs" aria-label="按后端筛选"><button aria-pressed={backendFilter === 'all'} className={backendFilter === 'all' ? 'selected' : ''} onClick={() => setBackendFilter('all')}>全部</button>{(['claude', 'codex', 'dsh'] as Backend[]).map((backend) => <button key={backend} aria-pressed={backendFilter === backend} className={backendFilter === backend ? 'selected' : ''} onClick={() => setBackendFilter(backend)}>{BACKEND[backend].short}</button>)}</div></div>
               <label className="filter-group"><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as SessionStatus | 'all' | 'attention' | 'unread')}><option value="all">全部状态</option><option value="attention">需要处理</option><option value="unread">未读提醒</option><option value="running">运行中</option><option value="waiting_input">等待输入</option><option value="waiting_approval">等待审批</option><option value="idle">空闲</option><option value="error">异常</option><option value="stopped">已停止</option><option value="unknown">状态未知</option></select></label>
-              <label className="filter-group"><span>排序</span><select aria-label="联系人排序" value={contactSort} onChange={(event) => setContactSort(event.target.value as ContactSort)}><option value="created">创建时间</option><option value="activity">最近活动</option><option value="name">名称</option></select></label>
+              <label className="filter-group"><span>排序</span><select aria-label="联系人排序" value={contactSort} onChange={(event) => setContactSort(event.target.value as ContactSort)}><option value="activity">最近活动</option><option value="created">创建时间</option><option value="name">名称</option></select></label>
             </FilterMenu></>}
           {state?.demo && <span className="demo-badge" title="演示模式 · 示例数据">演示模式 · 示例数据</span>}
           <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
-          <button className={`icon-button ${view === 'backends' ? 'active' : ''}`} aria-label="连接与能力" title="连接与能力" onClick={() => navigate('backends')}><Settings2 size={17} /></button>
-          <button className="icon-button" aria-label="使用说明与快捷键" title="使用说明与快捷键（?）" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17} /></button>
           <button className={`icon-button ${workspaceOpen ? 'active' : ''}`} aria-label="打开资源管理器" title="打开资源管理器" disabled={!workspaceSession} onClick={() => setWorkspaceOpen((value) => !value)}><Folder size={17} /></button>
-          <button className="icon-button" aria-label="导入会话" title="导入本机已有会话" disabled={!state} onClick={() => setModal({ type: 'import' })}><ArrowDownToLine size={17} /></button>
-          <button className="button primary new-contact" aria-label="新建联系人" disabled={!state} onClick={() => setModal({ type: 'create' })}><Plus size={15} /><span>新建联系人</span></button>
+          <MoreMenu items={[
+            { label: '导入会话', icon: <ArrowDownToLine size={14} />, disabled: !state, onSelect: () => setModal({ type: 'import' }) },
+            { label: '连接与能力', icon: <Settings2 size={14} />, active: view === 'backends', onSelect: () => navigate('backends') },
+            { label: '使用说明与快捷键', icon: <CircleHelp size={14} />, onSelect: () => setModal({ type: 'help' }) },
+          ]} />
+          <button className="button primary new-contact" aria-label="新建联系人" title="新建联系人" disabled={!state} onClick={() => setModal({ type: 'create' })}><Plus size={17} /></button>
         </div>
       </div>
     </header>
@@ -639,6 +641,21 @@ function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArch
     <div className="card-activity"><span className="activity-chip" title={`${preview}\n${session.cwd}`}>{preview}</span><time dateTime={session.lastActivity} title={new Date(session.lastActivity).toLocaleString('zh-CN')}>{relativeTime(session.lastActivity)}</time>
       <span className="card-menu-anchor" ref={menuRef}><button ref={menuButtonRef} className="icon-button" aria-label={`${session.title} 的更多操作`} aria-expanded={menu} onClick={() => setMenu(!menu)}><Ellipsis size={15} /></button>{menu && <div className="dropdown-menu"><button onClick={() => { menuButtonRef.current?.focus(); onRename(); setMenu(false); }}><Pencil size={14} />改名</button><button onClick={() => { menuButtonRef.current?.focus(); onPin(); setMenu(false); }}><Pin size={14} />{session.pinned ? '取消置顶' : '置顶联系人'}</button><button disabled={!canFork} title={canFork ? undefined : !session.nativeSessionId || session.forkPending ? '请先启动原生会话并完成初始化' : '该后端暂不可 Fork'} onClick={() => { menuButtonRef.current?.focus(); onFork(); setMenu(false); }}><GitFork size={14} />Fork 会话</button><button aria-label={`复制 ${session.title} 的工作目录`} title={session.cwd} onClick={() => { menuButtonRef.current?.focus(); onCopyDirectory(); setMenu(false); }}><Copy size={14} />复制工作目录</button><button onClick={() => { menuButtonRef.current?.focus(); onShare(); setMenu(false); }}><Link2 size={14} />分享会话</button><span /><button onClick={() => { onArchive(); setMenu(false); }}><Archive size={14} />{session.archived ? '恢复到列表' : '归档联系人'}</button></div>}</span></div>
   </article>;
+}
+
+/** Rarely used topbar actions share one dropdown so the bar stays short on phones. */
+function MoreMenu({ items }: { items: { label: string; icon: ReactNode; onSelect: () => void; disabled?: boolean; active?: boolean }[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: MouseEvent) => { if (!ref.current?.contains(event.target as Node)) setOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); ref.current?.querySelector<HTMLButtonElement>('button')?.focus(); } };
+    document.addEventListener('mousedown', outside); document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape); };
+  }, [open]);
+  return <div className="more-menu" ref={ref}><button className={`icon-button ${open || items.some(item => item.active) ? 'active' : ''}`} aria-label="更多" title="更多" aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(!open)}><Ellipsis size={17} /></button>
+    {open && <div className="dropdown-menu" role="menu">{items.map(item => <button key={item.label} role="menuitem" aria-label={item.label} disabled={item.disabled} className={item.active ? 'active' : ''} onClick={() => { setOpen(false); item.onSelect(); }}>{item.icon}{item.label}</button>)}</div>}</div>;
 }
 
 function FilterMenu({ active, reset, children }: { active: boolean; reset: () => void; children: ReactNode }) {

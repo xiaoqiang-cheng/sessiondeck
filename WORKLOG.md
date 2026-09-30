@@ -260,3 +260,10 @@
 
 - 对话记录页原有四块固定文字：标题栏「Claude 对话记录 · 只读 · 刷新记录」、引导栏「查看这个会话已保存的用户输入与回复……进入原生终端」、截断提示「这里只显示最近一部分记录……」、页脚「N 条消息 · 更新于 HH:MM · 回到最新消息」。合并为一行 34px 的工具栏：消息数、截断说明（灰色小字，窄屏隐藏，悬停可见全文）、同步时间，右侧「回到最新消息」（仅离开底部时出现）、刷新和进入终端两个图标按钮。后端名称已由会话头部的视图切换标出，不再重复。
 - 更新对应断言；`conversation.spec` 与 `codex-chat.spec` 共 12 项通过。截图 `artifacts/conversation-compact.png`。
+
+## 2026-10-01：手机端 App 化、顶部栏精简、最近活动排序
+
+- PWA：新增 `public/manifest.webmanifest`（standalone、独立图标与 maskable 图标）、`apple-mobile-web-app-*` 与 `viewport-fit=cover`。iPhone 上「添加到主屏幕」后以全屏无浏览器框打开；安装态下禁用长按选中（输入区、终端、代码、预览除外）。顶部栏和底部输入栏按 safe-area 让出刘海与 Home 条。手机上弹窗改为底部上滑的面板。
+- 顶部栏：「新建联系人」改为单个「+」；导入会话、连接与能力、使用说明收进「更多」菜单（`MoreMenu`，键盘可达、Escape 关闭、当前页高亮）；手机上隐藏连接指示点与演示徽标，导航项缩小一档。保留搜索、筛选、资源管理器、终端。
+- 排序：置顶 → 被阻塞 → 运行中 → 其余默认按最近活动（原为创建时间），可改为创建时间或名称。对应测试与帮助文案更新。
+- 手机截图 `artifacts/mobile-home.png`、`mobile-session.png`、`mobile-more.png`；桌面顶部栏 `artifacts/desktop-topbar.png`。`npm run verify`：179 项后端、67 项浏览器通过。

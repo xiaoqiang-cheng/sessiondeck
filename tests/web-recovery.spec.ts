@@ -319,7 +319,9 @@ test('an unavailable initial service disables creation and gives a recoverable c
   await page.goto('/');
   await expect(page.locator('.connection-error')).toContainText('无法连接本地服务');
   await expect(page.getByRole('button', { name: '新建联系人', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: '导入会话', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '更多', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: '导入会话', exact: true })).toBeDisabled();
+  await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: '创建群组', exact: true })).toBeDisabled();
   await page.unroute('**/api/state');
   await page.getByRole('button', { name: '重试连接', exact: true }).click();
