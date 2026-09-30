@@ -119,7 +119,7 @@ export function SecuritySettings({ auth, notify }: { auth: Extract<AuthStatus, {
     <p className="form-note">SessionDeck 从这台电脑通过 SSH 连到你的服务器，服务器上的 Caddy 用你的域名提供 HTTPS。电脑不需要公网 IP。</p>
     <div className="security-grid">
       {field('publicUrl', '公开地址', 'https://deck.example.com')}
-      {field('sshHost', '服务器地址', '203.0.113.10 或 ssh 别名')}
+      {field('sshHost', '服务器地址（可选）', draft?.publicUrl ? `默认使用 ${(() => { try { return new URL(draft.publicUrl).hostname; } catch { return '公开地址的域名'; } })()}` : '默认使用公开地址的域名')}
       {field('sshUser', 'SSH 用户', 'deploy')}
       {field('sshPort', 'SSH 端口', '22', 'number')}
       <label className="form-label">SSH 密码（可选）<input disabled={!local} type="password" autoComplete="new-password" placeholder={draft?.hasPassword ? '已保存，输入新密码以更换' : '使用密钥时留空'} value={sshPassword} onChange={event => setSshPassword(event.target.value)} /></label>
@@ -133,7 +133,7 @@ export function SecuritySettings({ auth, notify }: { auth: Extract<AuthStatus, {
     </div>
     {local && !passwordSet && <p className="form-note"><CircleAlert size={14} />启用远程访问前请先设置所有者密码。</p>}
     <details className="security-caddy"><summary>服务器配置（一次性）</summary>
-      <ol><li>确认服务器已安装 Caddy，并把域名解析到服务器 IP。</li><li>把下面的配置写入 <code>/etc/caddy/Caddyfile</code>，然后执行 <code>sudo systemctl reload caddy</code>。</li><li>确认这台电脑能 SSH 登录服务器（<code>ssh {draft?.sshUser || 'user'}@{draft?.sshHost || 'server'}</code>）：配置密钥，或在上面填写 SSH 密码。</li></ol>
+      <ol><li>确认服务器已安装 Caddy，并把域名解析到服务器 IP。</li><li>把下面的配置写入 <code>/etc/caddy/Caddyfile</code>，然后执行 <code>sudo systemctl reload caddy</code>。</li><li>确认这台电脑能 SSH 登录服务器（<code>ssh {draft?.sshUser || 'user'}@{draft?.sshHost || (() => { try { return new URL(draft?.publicUrl ?? '').hostname; } catch { return 'server'; } })()}</code>）：配置密钥，或在上面填写 SSH 密码。</li></ol>
       <pre>{remote?.caddy}</pre>
       <button className="text-button" onClick={() => remote && void copyToClipboard(remote.caddy).then(() => notify('已复制 Caddy 配置'))}><Copy size={13} />复制配置</button>
     </details>

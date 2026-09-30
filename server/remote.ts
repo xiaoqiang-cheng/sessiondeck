@@ -69,9 +69,12 @@ export function normalizeRemote(input: Record<string, unknown>, current: RemoteS
   if ('serverPort' in input) next.serverPort = port(input.serverPort, '服务器转发端口');
   if ('localPort' in input) next.localPort = port(input.localPort, '远程监听端口');
   if ('enabled' in input) next.enabled = input.enabled === true;
-  if (next.enabled && (!next.publicUrl || !next.sshHost || !next.sshUser)) fail('请先填写公开地址、服务器地址和 SSH 用户');
+  if (next.enabled && (!next.publicUrl || !next.sshUser)) fail('请先填写公开地址和 SSH 用户');
   return next;
 }
+
+/** The SSH target defaults to the public domain; set sshHost only when they differ. */
+export const sshTarget = (settings: RemoteSettings) => settings.sshHost || (settings.publicUrl ? new URL(settings.publicUrl).hostname : '');
 
 export function caddyConfig(settings: RemoteSettings) {
   // A non-default port (443 already taken, for example) is kept in the site
@@ -133,7 +136,7 @@ export class Tunnel extends EventEmitter {
       ...(identity ? ['-i', identity, '-o', 'IdentitiesOnly=yes'] : []),
       // Bind only the server's loopback: the public side is Caddy's TLS, never ssh.
       '-R', `127.0.0.1:${settings.serverPort}:127.0.0.1:${settings.localPort}`,
-      '--', `${settings.sshUser}@${settings.sshHost}`,
+      '--', `${settings.sshUser}@${sshTarget(settings)}`,
     ];
     this.set('connecting');
     let stderr = '';

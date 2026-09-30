@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { authorize, matchRoute } from './access.ts';
 import { AuthStore } from './auth.ts';
 import { allowedRemoteRequest } from './security.ts';
-import { normalizeRemote, DEFAULT_REMOTE } from './remote.ts';
+import { normalizeRemote, DEFAULT_REMOTE, sshTarget } from './remote.ts';
 import type { AppState, Session } from '../shared/types.ts';
 import type { AuthStatus, Share } from '../shared/auth.ts';
 
@@ -57,6 +57,10 @@ test('remote requests need the configured host and a same-origin mutation', () =
   assert.throws(() => normalizeRemote({ sshHost: '-oProxyCommand=x' }, { ...DEFAULT_REMOTE, localPort: 4318 }), /格式无效/);
   assert.throws(() => normalizeRemote({ publicUrl: 'https://a.example/path' }, { ...DEFAULT_REMOTE, localPort: 4318 }), /不要包含路径/);
   assert.throws(() => normalizeRemote({ enabled: true }, { ...DEFAULT_REMOTE, localPort: 4318 }), /请先填写/);
+  // The SSH target defaults to the public domain (port stripped).
+  const inferred = normalizeRemote({ enabled: true, publicUrl: 'https://deck.example.com:8443', sshUser: 'ubuntu' }, { ...DEFAULT_REMOTE, localPort: 4318 });
+  assert.equal(sshTarget(inferred), 'deck.example.com');
+  assert.equal(sshTarget({ ...inferred, sshHost: 'bastion.example.com' }), 'bastion.example.com');
 });
 
 test('auth store hashes secrets, throttles guesses and revokes share devices', async () => {
@@ -237,7 +241,7 @@ test('SSH password reaches ssh through askpass, never argv, and is sealed at res
   process.env.PATH = `${dir}:${originalPath}`;
   const tunnel = new Tunnel(dir);
   try {
-    const settings = { ...DEFAULT_REMOTE, enabled: true, publicUrl: 'https://deck.example.com', sshHost: 'example.com', sshUser: 'ubuntu', localPort: 4318 };
+    const settings = { ...DEFAULT_REMOTE, enabled: true, publicUrl: 'https://deck.example.com', sshHost: '', sshUser: 'ubuntu', localPort: 4318 };
     await tunnel.configure(settings, 'p@ss word$`x');
     await until(() => { try { return readFileSync(record, 'utf8').includes('ASKPASS:'); } catch { return false; } }, 'fake ssh ran');
     const recorded = readFileSync(record, 'utf8');
@@ -245,6 +249,7 @@ test('SSH password reaches ssh through askpass, never argv, and is sealed at res
     assert.ok(!/ARGV:.*p@ss/.test(recorded), 'password is not in argv');
     assert.match(recorded, /BatchMode=no/);
     assert.match(recorded, /-R 127\.0\.0\.1:17317:127\.0\.0\.1:4318/);
+    assert.match(recorded, /ubuntu@deck\.example\.com/);
   } finally {
     await tunnel.close(); process.env.PATH = originalPath; rmSync(dir, { recursive: true, force: true });
   }
