@@ -184,3 +184,10 @@
 - 发现工作区内 `server/remote.ts`、`shared/auth.ts`、`server/auth.test.ts`、`client/Sharing.tsx` 是 SSH 密码提交之前的旧副本，导致类型检查失败；已恢复到 HEAD，旧副本差异保存在 `artifacts/stale-revert.patch`。
 - 修复 `tests/remote-auth.spec.ts` 的竞态：在检查「设置密码」按钮前先等待设置面板渲染。
 - `npm run verify`：类型检查、179 项后端测试通过；浏览器 62 项中 61 项通过，`remote-auth` 因上述竞态失败一次，修复后单独重跑通过。日志 `artifacts/verify-card-fixes.log`。
+
+## 2026-09-30：修复中文无法输入（输入法修复的回归）
+
+- 上一轮为解决候选期间按数字被当作原始按键的问题，在 xterm 自定义按键处理里拦截了所有 `keyCode === 229`。但在我们启用 `screenReaderMode` 的终端里，xterm 的 `input` 事件路径被禁用，非合成状态下的 229 是 xterm 得知输入法已把文字提交进 textarea 的唯一途径（Linux 上 fcitx/ibus 常走这条路），拦截后中文完全无法输入。20:39 发布的前端包含了这个回归。
+- 现在只在 `event.isComposing` 为真（候选框打开）时把按键交给输入法；非合成状态的 229 照常交给 xterm 处理。
+- 新增 `tests/terminal-ime.spec.ts`：回放两条输入法路径（直接提交进 textarea 的 229；合成中按数字选字后 compositionend），观察终端发出的输入帧。修复前该测试失败（`中文` 未发出），修复后通过；普通按键不受影响。
+- 已用原子构建重新发布前端；正式 4317 服务未重启，刷新页面即可生效。
