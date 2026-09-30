@@ -13,7 +13,6 @@ async function openDemoCodex(page: import('@playwright/test').Page, title = 'Ses
 demoTest('demo terminal keeps ordinary text paste available to the native terminal', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await openDemoCodex(page);
-  await page.getByRole('button', { name: /^(?:启动|恢复)原生会话$/ }).click();
   await expect(page.locator('.terminal-connection')).toHaveText('已连接');
   const pasteWasNotCancelled = await page.locator('.terminal-pane').evaluate((element) => {
     const transfer = new DataTransfer();

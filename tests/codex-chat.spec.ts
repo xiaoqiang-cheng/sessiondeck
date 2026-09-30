@@ -177,7 +177,8 @@ test('Codex drafts keep IME Enter and newlines, while disconnects disable sendin
   await emit(page, `/api/sessions/${app.contact.id}/chat/events`, 'error');
   await expect(page.getByRole('button', { name: '发送', exact: true })).toBeDisabled();
   await expect(page.locator('.codex-chat-banner')).toContainText('草稿已保留');
-  expect(app.requests).toEqual([]);
+  // Re-entering from the card starts the stopped contact; no draft is sent.
+  expect(app.requests).toEqual([{ path: 'start', body: { mode: 'chat' } }]);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await expect(input).toBeVisible();

@@ -19,7 +19,7 @@ test('contacts, native terminal, fork and directed group collaboration work in t
   await create.getByRole('button', { name: /Codex/ }).click();
   await create.getByRole('button', { name: '创建联系人', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '浏览器验收联系人 的私聊' })).toBeVisible();
-  await page.getByRole('button', { name: '启动原生会话', exact: true }).click();
+  // Opening a contact starts its native session without a second click.
   await expect(page.getByRole('button', { name: '停止进程', exact: true })).toBeVisible();
   await expect(page.locator('.terminal-connection')).toHaveText('已连接');
   await page.locator('.xterm-helper-textarea').pressSequentially('private correction');
@@ -44,7 +44,6 @@ test('contacts, native terminal, fork and directed group collaboration work in t
   await page.getByRole('dialog').getByLabel('联系人名称').fill('群组实现成员');
   await page.getByRole('button', { name: 'Fork 入群', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '群组实现成员 的私聊' })).toBeVisible();
-  await page.getByRole('button', { name: '恢复原生会话', exact: true }).click();
   await expect(page.getByRole('button', { name: '停止进程', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '关闭会话', exact: true }).click();
   await page.getByRole('button', { name: '分配任务', exact: true }).click();
@@ -106,12 +105,12 @@ test('keyboard navigation keeps modal focus, leaves the workbench interactive, a
   await card.click();
   const drawer = page.getByRole('dialog', { name: 'SessionDeck · 开发笔记 的私聊' });
   await expect(drawer).toBeVisible();
-  // The session is an in-flow workbench view; the contact list remains
-  // available behind it instead of being made inert like a modal dialog.
+  // The session replaces the card grid in the workbench (other sessions are
+  // tabs); it is not a modal, so navigation and the terminal dock stay usable.
   await expect(page.locator('main')).not.toHaveAttribute('inert');
+  await expect(page.locator('main')).toBeHidden();
   await expect(drawer).toHaveAttribute('aria-modal', 'false');
-  await card.focus();
-  await expect(card).toBeFocused();
+  await expect(drawer.getByRole('tab', { name: /SessionDeck · 开发笔记/ })).toHaveAttribute('aria-selected', 'true');
   await page.getByLabel('原生会话终端输入').focus();
   await page.keyboard.press('Escape');
   await expect(drawer).toBeVisible();
@@ -205,6 +204,8 @@ test('session bookmarks reload the same private context and browser history rest
   await expect(page).toHaveURL(/#\/contacts$/);
   await page.goForward();
   await expect(page.getByRole('dialog', { name: 'SessionDeck · 开发笔记 的私聊' })).toBeVisible();
+  // The demo contact is already running, so even the card click has nothing
+  // to start; reloads and history never launch an agent.
   expect(startRequests).toEqual([]);
 });
 
