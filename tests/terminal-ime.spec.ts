@@ -58,3 +58,42 @@ test('IME text committed straight into the textarea and candidates picked with a
   await textarea.press('2');
   await expect.poll(() => sent.at(-1)).toBe('2');
 });
+
+test('a touch keyboard that commits text through an input event alone (iOS) reaches the terminal', async ({ browser }) => {
+  // iOS keyboards deliver IME text as an `input` event with no keydown 229.
+  const context = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  try {
+    const sent = observeInput(page);
+    await page.goto('/');
+    await page.getByRole('button', { name: '进入 SessionDeck · 开发笔记 的会话', exact: true }).click();
+    await expect(page.locator('.terminal-connection')).toHaveText('已连接');
+    const textarea = page.locator('.xterm-helper-textarea');
+    await textarea.focus();
+    await textarea.evaluate((element: HTMLTextAreaElement) => {
+      element.value = '你好';
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '你好' }));
+    });
+    await expect.poll(() => sent.join('')).toContain('你好');
+    // Third-party keyboards (WeChat, Sogou) go through composition events and
+    // rewrite the field; the committed text must arrive exactly once.
+    const afterNative = sent.length;
+    await textarea.evaluate((element: HTMLTextAreaElement) => {
+      element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+      element.value = 'shijie';
+      element.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: 'shijie' }));
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', data: 'shijie', isComposing: true }));
+    });
+    await page.waitForTimeout(30);
+    await textarea.evaluate((element: HTMLTextAreaElement) => {
+      element.value = '世界';
+      element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '世界' }));
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromComposition', data: '世界' }));
+    });
+    await expect.poll(() => sent.slice(afterNative).join('')).toBe('世界');
+    // Regular key presses still travel once, through xterm's own keydown path.
+    const before = sent.length;
+    await textarea.press('a');
+    await expect.poll(() => sent.slice(before).join('')).toBe('a');
+  } finally { await context.close(); }
+});

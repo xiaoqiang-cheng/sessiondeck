@@ -48,9 +48,14 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     terminalIdRef.current = null; setTerminalId(null); setImageStatus('');
     uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; setUploadingImage(false);
     selectionRef.current('');
+    // xterm's screenReaderMode suppresses its `input` event path, which is the
+    // only way iOS keyboards commit Chinese (there is no keydown 229 there,
+    // unlike fcitx/ibus on desktop). Keep the accessibility tree for desktop
+    // screen readers and tests; on touch devices use the plain input path.
+    const touchDevice = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches;
     const terminal = new Terminal({
       cursorBlink: true, fontSize: 13, lineHeight: 1.25, scrollback: 8000,
-      disableStdin: true, screenReaderMode: true,
+      disableStdin: true, screenReaderMode: !touchDevice,
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
       theme: {
         background: '#16181d', foreground: '#e6e7ea', cursor: '#e6e7ea',
@@ -74,6 +79,43 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
       return true;
     });
     terminal.textarea?.setAttribute('aria-label', channel === 'shell' ? 'Shell 终端输入' : '原生会话终端输入');
+    // Mobile keyboards commit IME text in ways xterm's keydown-driven path
+    // never sees: iOS Pinyin as a bare `input` event, WeChat/Sogou keyboards
+    // through composition events or by rewriting the whole textarea. On touch
+    // devices we own the textarea instead: when a composition ends, or an
+    // input event lands with no keydown behind it, send whatever text the
+    // keyboard put in the field and clear it. Desktop keeps xterm's path.
+    const textarea = terminal.textarea;
+    let keyDownSeen = false;
+    let composing = false;
+    const onKeyDown = () => { keyDownSeen = true; };
+    const onKeyUp = () => { keyDownSeen = false; };
+    const flushTextarea = () => {
+      if (!textarea || !textarea.value) return;
+      const text = textarea.value;
+      textarea.value = '';
+      if (!acceptsInput || uploadingRef.current || socket?.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'input', data: text }));
+    };
+    const onCompositionStart = () => { composing = true; };
+    const onCompositionEnd = () => {
+      composing = false;
+      // The IME writes the committed text after this event fires.
+      setTimeout(flushTextarea, 0);
+    };
+    const onInput = (event: Event) => {
+      if (composing || keyDownSeen) return;
+      const input = event as InputEvent;
+      if (input instanceof InputEvent && (input.isComposing || (input.inputType && input.inputType !== 'insertText' && input.inputType !== 'insertReplacementText' && input.inputType !== 'insertFromPaste'))) return;
+      flushTextarea();
+    };
+    if (touchDevice) {
+      textarea?.addEventListener('keydown', onKeyDown);
+      textarea?.addEventListener('keyup', onKeyUp);
+      textarea?.addEventListener('compositionstart', onCompositionStart);
+      textarea?.addEventListener('compositionend', onCompositionEnd);
+      textarea?.addEventListener('input', onInput);
+    }
     terminalRef.current = terminal;
     fitRef.current = fit;
     function resize() {
@@ -155,6 +197,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     void connect();
     return () => {
       disposed = true; clearTimeout(reconnect); clearTimeout(copiedTimer.current); uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; socket?.close(); input.dispose(); selection.dispose();
+      textarea?.removeEventListener('keydown', onKeyDown); textarea?.removeEventListener('keyup', onKeyUp); textarea?.removeEventListener('compositionstart', onCompositionStart); textarea?.removeEventListener('compositionend', onCompositionEnd); textarea?.removeEventListener('input', onInput);
       resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
     };
   }, [sessionId, running, channel, readOnlyRequested]);
