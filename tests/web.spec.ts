@@ -581,19 +581,22 @@ test('the "需要你处理" badge counts unread reminders, matching the red badg
   await mockWorkspace(page, state => {
     const seed = state.sessions[0];
     state.sessions = [
-      { ...seed, id: 'seen-waiting', title: '已看过但仍在等待', groupId: null, archived: false, pinned: false, status: 'waiting_input', unread: 0 },
-      { ...seed, id: 'unseen-done', title: '完成后还没看', groupId: null, archived: false, pinned: false, status: 'idle', unread: 1 },
-      { ...seed, id: 'unseen-waiting', title: '等待且未读', groupId: null, archived: false, pinned: false, status: 'waiting_approval', unread: 2 },
-      { ...seed, id: 'archived-unseen', title: '已归档的未读', groupId: null, archived: true, pinned: false, status: 'error', unread: 1 },
+      { ...seed, id: 'seen-waiting', title: '已看过但仍在等待', groupId: null, archived: false, pinned: false, running: true, status: 'waiting_input', unread: 0, createdAt: '2026-01-01T00:00:00Z' },
+      { ...seed, id: 'stale-running', title: '曾提醒但已在运行', groupId: null, archived: false, pinned: true, running: true, status: 'running', unread: 1, createdAt: '2026-01-02T00:00:00Z' },
+      { ...seed, id: 'unseen-waiting', title: '等待且未读', groupId: null, archived: false, pinned: false, running: true, status: 'waiting_approval', unread: 2, createdAt: '2026-01-03T00:00:00Z' },
+      { ...seed, id: 'archived-unseen', title: '已归档的未读', groupId: null, archived: true, pinned: false, running: false, status: 'error', unread: 1, createdAt: '2026-01-04T00:00:00Z' },
     ];
   });
   await page.goto('/');
   const nav = page.getByRole('navigation', { name: '工作空间导航' });
-  // Two cards carry a red badge; the nav badge shows the same two.
-  await expect(page.locator('.session-card .unread-badge')).toHaveCount(2);
+  // Only a session that is blocked on you and not yet looked at is red; a
+  // stale reminder on a running session is not. The nav badge agrees.
+  await expect(page.locator('.session-card .unread-badge')).toHaveCount(1);
   const attentionTab = nav.getByRole('button', { name: /^需要你处理/ });
-  await expect(attentionTab.locator('b')).toHaveText('2');
+  await expect(attentionTab.locator('b')).toHaveText('1');
+  await expect(page).toHaveTitle(/^\(1\) /);
+  // Blocked sessions sort above pinned ones; pinned above the merely running.
+  await expect(page.locator('.session-card h3')).toHaveText(['等待且未读', '已看过但仍在等待', '曾提醒但已在运行']);
   await attentionTab.click();
-  await expect(page.locator('.session-card h3')).toHaveText(['等待且未读', '完成后还没看']);
-  await expect(page).toHaveTitle(/^\(2\) /);
+  await expect(page.locator('.session-card h3')).toHaveText(['等待且未读']);
 });

@@ -830,6 +830,18 @@ terminals.on('exit', (id: string, exitCode: number) => {
 });
 shells.on('data', (id: string, data: string) => terminalEvent(id, { type: 'data', data }, 'shellId'));
 shells.on('exit', (id: string, exitCode: number) => terminalEvent(id, { type: 'exit', exitCode }, 'shellId'));
+// A phone and a desktop can watch the same PTY. Sizing it to whichever
+// viewer resized last reflows the native TUI under everyone else, so the PTY
+// takes the smallest width and height among the viewers that may type.
+function applySharedSize(id: string) {
+  let cols = Infinity, rows = Infinity;
+  for (const socket of wss.clients) {
+    const client = socket as WebSocket & { sessionId?: string; size?: { cols: number; rows: number } };
+    if (client.sessionId !== id || client.readyState !== WebSocket.OPEN || !client.size) continue;
+    cols = Math.min(cols, client.size.cols); rows = Math.min(rows, client.size.rows);
+  }
+  if (Number.isFinite(cols) && Number.isFinite(rows)) terminals.resize(id, cols, rows);
+}
 function upgrade(req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) {
   const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
   const shellMatch = /^\/api\/shells\/([^/]+)\/terminal$/.exec(url.pathname);
@@ -878,6 +890,7 @@ function upgrade(req: import('node:http').IncomingMessage, socket: import('node:
     viewers.set(ws, viewer);
     ws.on('error', () => ws.close());
     (ws as WebSocket & { sessionId: string }).sessionId = id;
+    ws.on('close', () => applySharedSize(id));
     ws.send(JSON.stringify({ type: 'data', data: terminals.buffer(id) }));
     // The browser uses this per-PTY UUID to prevent an image upload from
     // landing in a replacement process after a stop/restart race.
@@ -891,8 +904,10 @@ function upgrade(req: import('node:http').IncomingMessage, socket: import('node:
           attribute();
           terminals.input(id, message.data);
         }
-        // A viewer's window size must not reflow the owner's native TUI.
-        else if (message.type === 'resize' && canInput) terminals.resize(id, message.cols, message.rows);
+        else if (message.type === 'resize' && canInput && Number.isInteger(message.cols) && Number.isInteger(message.rows)) {
+          (ws as WebSocket & { size?: { cols: number; rows: number } }).size = { cols: message.cols, rows: message.rows };
+          applySharedSize(id);
+        }
       } catch (error) { ws.send(JSON.stringify({ type: 'error', error: error instanceof Error ? error.message : '终端输入失败' })); }
     });
   });

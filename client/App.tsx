@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import {
   ArrowDownToLine, ArrowRight, Archive, Bell, BellOff, Check, CheckCheck,
   CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
-  GitFork, Layers3, LoaderCircle, MessageSquare, Pencil, Pin, PinOff, Play, Plus,
+  GitFork, LoaderCircle, MessageSquare, Pencil, Pin, PinOff, Play, Plus,
   Radio, Search, Send, Settings2, Share2, SlidersHorizontal, Square, UsersRound, X,
   PanelBottomOpen, Volume2, VolumeX, TerminalSquare, Link2,
 } from 'lucide-react';
@@ -57,8 +57,8 @@ function readOpenTabs(): string[] {
 }
 /** The agent is blocked on a person: waiting for input or approval, or failed. */
 const attention = (s: Session) => s.status === 'waiting_input' || s.status === 'waiting_approval' || s.status === 'error';
-/** Something happened that you have not looked at yet; clears when the session is opened. */
-const unseen = (s: Session) => s.unread > 0;
+/** Red badge: blocked on a person AND not looked at since. Opening the session clears it. */
+const pending = (s: Session) => attention(s) && s.unread > 0;
 const relativeTime = (value: string) => {
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000));
   if (!Number.isFinite(minutes)) return '—';
@@ -68,6 +68,10 @@ const relativeTime = (value: string) => {
 };
 const shortPath = (path: string) => path.replace(/\/$/, '').split('/').filter(Boolean).slice(-2).join('/') || path;
 
+/** Three stacked sessions, the top one lit: the mark also lives in public/favicon.svg. */
+export function BrandMark({ size = 18 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="2.5" fill="currentColor" /><rect x="3" y="11" width="14" height="4" rx="2" fill="currentColor" opacity=".7" /><rect x="3" y="17" width="10" height="4" rx="2" fill="currentColor" opacity=".45" /><circle cx="17.5" cy="6.5" r="1.6" fill="#ff3b30" stroke="#fff" strokeWidth="1" /></svg>;
+}
 export function BackendAvatar({ backend, small = false }: { backend: Backend; small?: boolean }) {
   return <span className={`backend-avatar ${BACKEND[backend].color} ${small ? 'small' : ''}`} aria-label={BACKEND[backend].name}>{BACKEND[backend].glyph}</span>;
 }
@@ -358,7 +362,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
     return () => { clearInterval(timer); clearTimeout(toastTimer.current); };
   }, []);
   useEffect(() => {
-    const count = state?.sessions.filter((session) => !session.archived && unseen(session)).length ?? 0;
+    const count = state?.sessions.filter((session) => !session.archived && pending(session)).length ?? 0;
     document.title = `${count ? `(${count}) ` : ''}${selected?.title ?? currentGroup?.title ?? ({ contacts: '会话联系人', attention: '需要你处理', running: '正在运行', archive: '已归档', backends: '连接与能力', activity: '最近活动' } as Record<string, string>)[view] ?? '会话联系人'} · SessionDeck`;
   }, [state, selected?.title, currentGroup?.title, view, clock]);
   useEffect(() => {
@@ -422,23 +426,20 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   const sessions = state?.sessions ?? [];
   const personal = sessions.filter((session) => !session.archived && !session.groupId);
   // Matches the red badge on cards, so the count drops as you read each one.
-  const needsAttention = sessions.filter((session) => !session.archived && unseen(session));
+  const needsAttention = sessions.filter((session) => !session.archived && pending(session));
   const running = sessions.filter((session) => !session.archived && session.status === 'running');
   const archived = sessions.filter((session) => session.archived);
   const visible = sessions.filter((session) => {
-    if (groupId ? session.groupId !== groupId || session.archived : view === 'archive' ? !session.archived : view === 'attention' ? session.archived || !unseen(session) : view === 'running' ? session.archived || session.status !== 'running' : session.archived || !!session.groupId) return false;
+    if (groupId ? session.groupId !== groupId || session.archived : view === 'archive' ? !session.archived : view === 'attention' ? session.archived || !pending(session) : view === 'running' ? session.archived || session.status !== 'running' : session.archived || !!session.groupId) return false;
     return (backendFilter === 'all' || session.backend === backendFilter)
       && (statusFilter === 'all' || (statusFilter === 'attention' ? attention(session) : statusFilter === 'unread' ? session.unread > 0 : session.status === statusFilter))
       && `${session.title} ${session.cwd} ${session.lastUserInput || ''} ${BACKEND[session.backend].name}`.toLowerCase().includes(query.trim().toLowerCase());
   }).sort((a, b) => {
-    // Like a chat list: pinned stays on top; then contacts waiting on you (a
-    // reminder or a task that finished), then ones still working; the rest by
-    // the chosen order, where the default is newest first.
-    if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
-    const needs = (s: Session) => attention(s) || unseen(s);
-    if (needs(a) !== needs(b)) return Number(needs(b)) - Number(needs(a));
-    // Among those, an agent blocked on you outranks one that finished on its own.
+    // Like a chat list: whoever is waiting on you comes first, then pinned
+    // contacts, then ones still working; the rest by the chosen order, where
+    // the default is newest first.
     if (attention(a) !== attention(b)) return Number(attention(b)) - Number(attention(a));
+    if (a.pinned !== b.pinned) return Number(b.pinned) - Number(a.pinned);
     if (a.running !== b.running) return Number(b.running) - Number(a.running);
     if (contactSort === 'name') return a.title.localeCompare(b.title, 'zh-CN', { numeric: true, sensitivity: 'base' });
     return contactSort === 'activity' ? new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime() : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -481,7 +482,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   return <div className="app-shell">
     <header className="topbar" inert={!!modal}>
       <div className="topbar-row">
-        <a className="brand" href="#" aria-label="SessionDeck" title="SessionDeck" onClick={(event) => { event.preventDefault(); navigate('contacts'); }}><span className="brand-mark"><Layers3 size={15} strokeWidth={2} /></span></a>
+        <a className="brand" href="#" aria-label="SessionDeck" title="SessionDeck" onClick={(event) => { event.preventDefault(); navigate('contacts'); }}><span className="brand-mark"><BrandMark /></span></a>
         <div className="nav-scroller">
           <nav className="primary-nav" aria-label="工作空间导航">
             {tab('contacts', <MessageSquare size={15} />, '会话联系人', personal.length)}
@@ -491,7 +492,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
             {tab('activity', <Clock3 size={15} />, '最近活动')}
           </nav>
           <span className="nav-divider" aria-hidden="true" />
-          <nav className="group-nav" aria-label="协作群组">{state?.groups.map((group) => { const count = sessions.filter((session) => session.groupId === group.id && !session.archived).length; return <button key={group.id} title={group.goal ? `${group.title}\n${group.goal}` : group.title} aria-current={groupId === group.id ? 'page' : undefined} className={groupId === group.id ? 'active' : ''} onClick={() => navigate(`group:${group.id}`)}><span className="group-hash">#</span><span className="group-name">{group.title}</span>{sessions.some((session) => session.groupId === group.id && !session.archived && session.unread > 0) && <span className="group-unread-dot" aria-label="有未读提醒" title="群组成员有未读提醒" />}<span className="group-count">{count}</span></button>; })}</nav>
+          <nav className="group-nav" aria-label="协作群组">{state?.groups.map((group) => { const count = sessions.filter((session) => session.groupId === group.id && !session.archived).length; return <button key={group.id} title={group.goal ? `${group.title}\n${group.goal}` : group.title} aria-current={groupId === group.id ? 'page' : undefined} className={groupId === group.id ? 'active' : ''} onClick={() => navigate(`group:${group.id}`)}><span className="group-hash">#</span><span className="group-name">{group.title}</span>{sessions.some((session) => session.groupId === group.id && !session.archived && pending(session)) && <span className="group-unread-dot" aria-label="有未读提醒" title="群组成员有未读提醒" />}<span className="group-count">{count}</span></button>; })}</nav>
           {currentGroup && <button className="icon-button" aria-label="编辑群组" title="编辑群组名称与目标" onClick={() => setModal({ type: 'group', group: currentGroup })}><Pencil size={14} /></button>}
           <button className="icon-button" disabled={!state} aria-label="创建群组" title="创建群组" onClick={() => setModal({ type: 'group' })}><Plus size={16} /></button>
         </div>
@@ -505,8 +506,6 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
             </FilterMenu></>}
           {state?.demo && <span className="demo-badge" title="演示模式 · 示例数据">演示模式 · 示例数据</span>}
           <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
-          <button className={`icon-button ${soundEnabled ? 'enabled' : ''}`} title={soundEnabled ? '关闭提示音' : '开启提示音'} aria-label={soundEnabled ? '关闭提示音' : '开启提示音'} aria-pressed={soundEnabled} onClick={() => { const enabled = !soundEnabled; setSoundEnabled(enabled); writeLocalPreference('sessiondeck.sound', enabled ? 'on' : 'off'); if (enabled) notificationSound(); }}>{soundEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}</button>
-          <button className={`icon-button ${notifications ? 'enabled' : ''}`} title={notifications ? '关闭系统通知' : '开启系统通知'} aria-label={notifications ? '关闭系统通知' : '开启系统通知'} onClick={() => void toggleNotifications()}>{notifications ? <Bell size={17} /> : <BellOff size={17} />}</button>
           <button className={`icon-button ${view === 'backends' ? 'active' : ''}`} aria-label="连接与能力" title="连接与能力" onClick={() => navigate('backends')}><Settings2 size={17} /></button>
           <button className="icon-button" aria-label="使用说明与快捷键" title="使用说明与快捷键（?）" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17} /></button>
           <button className={`icon-button ${workspaceOpen ? 'active' : ''}`} aria-label="打开资源管理器" title="打开资源管理器" disabled={!workspaceSession} onClick={() => setWorkspaceOpen((value) => !value)}><Folder size={17} /></button>
@@ -527,7 +526,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       {error && <div role="alert" className="error-banner"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError('')}><X size={15} /></button></div>}
 
       {!state && !connectionError && <div className="loading-state"><LoaderCircle className="spin" size={22} /><p>正在连接你的工作空间…</p></div>}
-      {state && view === 'activity' ? <ActivityView activities={state.activities} sessions={state.sessions} open={openSession} /> : state && view === 'backends' ? <><BackendSettings state={state} refresh={() => void run('refresh', () => api('/backends/refresh', {}), '已重新检测本机后端')} onCreate={(backend) => { setBackendFilter(backend); setModal({ type: 'create', backend }); }} /><div className="backend-settings"><SecuritySettings auth={auth} notify={notify} /></div></> : state && <>
+      {state && view === 'activity' ? <ActivityView activities={state.activities} sessions={state.sessions} open={openSession} /> : state && view === 'backends' ? <><BackendSettings state={state} refresh={() => void run('refresh', () => api('/backends/refresh', {}), '已重新检测本机后端')} onCreate={(backend) => { setBackendFilter(backend); setModal({ type: 'create', backend }); }} /><div className="backend-settings"><section className="backend-setting-card" aria-label="提醒方式"><div className="backend-setting-title"><Bell size={20} /><div><h2>提醒方式</h2><p>需要你输入、审批或出错时，卡片会亮红点；这里决定是否同时发声和弹系统通知。</p></div></div><div className="notify-toggles"><button className={`button secondary small-button ${soundEnabled ? 'active' : ''}`} aria-label={soundEnabled ? '关闭提示音' : '开启提示音'} aria-pressed={soundEnabled} onClick={() => { const enabled = !soundEnabled; setSoundEnabled(enabled); writeLocalPreference('sessiondeck.sound', enabled ? 'on' : 'off'); if (enabled) notificationSound(); }}>{soundEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}{soundEnabled ? '提示音已开' : '提示音已关'}</button><button className={`button secondary small-button ${notifications ? 'active' : ''}`} aria-label={notifications ? '关闭系统通知' : '开启系统通知'} aria-pressed={notifications} onClick={() => void toggleNotifications()}>{notifications ? <Bell size={14} /> : <BellOff size={14} />}{notifications ? '系统通知已开' : '系统通知已关'}</button></div></section><SecuritySettings auth={auth} notify={notify} /></div></> : state && <>
           {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} onShare={() => setModal({ type: 'shareLink', session })} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={(invoker) => openSession(session, invoker)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
 
           {currentGroup && groupError && <div className="error-banner" role="alert"><span>群组动态加载失败：{groupError}</span><button className="text-button" onClick={() => setGroupReload((value) => value + 1)}>重试群组动态</button></div>}
@@ -540,9 +539,9 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
 
     {selected && state && <section ref={drawerRef} inert={!!modal} className="session-drawer" role="dialog" aria-modal="false" aria-label={`${selected.title} 的私聊`}>
       <div className="session-tabs" role="tablist" aria-label="打开的会话">
-        {openTabs.map(id => sessions.find(session => session.id === id)).filter((session): session is Session => !!session).map(session => { const active = session.id === selected.id; return <div key={session.id} className={`session-tab ${active ? 'active' : ''} ${session.unread > 0 && !active ? 'has-unread' : ''}`}>
+        {openTabs.map(id => sessions.find(session => session.id === id)).filter((session): session is Session => !!session).map(session => { const active = session.id === selected.id; return <div key={session.id} className={`session-tab ${active ? 'active' : ''} ${pending(session) && !active ? 'has-unread' : ''}`}>
           <button role="tab" aria-selected={active} title={`${session.title}\n${BACKEND[session.backend].name} · ${STATUS[session.status].label}\n${session.cwd}`} onClick={() => { if (!active) { setSelectedId(session.id); setSelection(''); } }} onAuxClick={event => { if (event.button === 1) { event.preventDefault(); closeTab(session.id); } }}>
-            <span className={`session-tab-glyph ${BACKEND[session.backend].color}`} aria-hidden="true">{BACKEND[session.backend].glyph}</span><span className="session-tab-title">{session.title}</span><span className={`status-point ${STATUS[session.status].className}`} aria-hidden="true" />{session.unread > 0 && !active && <b aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</b>}
+            <span className={`session-tab-glyph ${BACKEND[session.backend].color}`} aria-hidden="true">{BACKEND[session.backend].glyph}</span><span className="session-tab-title">{session.title}</span><span className={`status-point ${STATUS[session.status].className}`} aria-hidden="true" />{pending(session) && !active && <b aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</b>}
           </button>
           <button className="session-tab-close" aria-label={active ? '关闭会话' : `关闭 ${session.title}`} title={active ? '关闭标签页（Esc 返回列表）' : '关闭标签页'} onClick={() => closeTab(session.id)}><X size={13} /></button>
         </div>; })}
@@ -550,7 +549,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       <header className="drawer-header">
         <div className="drawer-heading-text">
           <div className="drawer-title"><h2 title={selected.title}>{selected.title}</h2><button className="icon-button rename-button" title="改名" aria-label="改名" onClick={() => setModal({ type: 'rename', session: selected })}><Pencil size={12} /></button><StatusBadge session={selected} /></div>
-          <nav className="session-meta" aria-label="会话关系"><span>{BACKEND[selected.backend].short}</span><button className="session-cwd" aria-label="复制工作目录" title={`${selected.cwd}\n点击复制`} onClick={() => void copyText(selected.cwd, '工作目录')}><Folder size={12} /><span><bdi>{selected.cwd}</bdi></span></button>{selectedGroup && <button className="session-meta-link" onClick={() => navigate(`group:${selectedGroup.id}`)}><UsersRound size={12} />{selectedGroup.title}</button>}{selectedParent && <button className="session-meta-link" onClick={() => openSession(selectedParent)}><GitFork size={12} />来源：{selectedParent.title}</button>}</nav>
+          <nav className="session-meta" aria-label="会话关系">{selected.statusDetail && <span className={`session-status-detail ${attention(selected) ? 'needs-attention' : ''}`} title={`${selected.statusDetail} · ${selected.statusSource === 'native' ? '后端状态' : selected.statusSource === 'terminal' ? '终端估测' : selected.statusSource === 'manual' ? '手动标记' : '进程状态'}`}>{selected.statusDetail}</span>}{selected.archived && <button className="session-meta-link" onClick={() => void patch(selected, { archived: false })}><Archive size={12} />已归档 · 恢复联系人</button>}<span>{BACKEND[selected.backend].short}</span><button className="session-cwd" aria-label="复制工作目录" title={`${selected.cwd}\n点击复制`} onClick={() => void copyText(selected.cwd, '工作目录')}><Folder size={12} /><span><bdi>{selected.cwd}</bdi></span></button>{selectedGroup && <button className="session-meta-link" onClick={() => navigate(`group:${selectedGroup.id}`)}><UsersRound size={12} />{selectedGroup.title}</button>}{selectedParent && <button className="session-meta-link" onClick={() => openSession(selectedParent)}><GitFork size={12} />来源：{selectedParent.title}</button>}</nav>
         </div>
         {(selected.backend !== 'dsh' || state.demo) && <div className="private-view-switch" role="group" aria-label="会话显示方式" title="同一个会话，切换视图不重启"><button aria-pressed={privateView !== 'terminal'} onClick={() => switchPrivateView(codexChatAvailable ? 'chat' : 'conversation')}><MessageSquare size={13} />{codexChatAvailable ? '图形对话' : '对话记录'}</button><button aria-pressed={privateView === 'terminal'} disabled={!!busy} onClick={() => switchPrivateView('terminal')}><TerminalSquare size={13} />原生终端</button></div>}
         <div className="drawer-actions">
@@ -568,9 +567,6 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
       </header>
       {connectionError && <div role="alert" className="error-banner connection-error"><span>{connectionError}</span><button className="text-button" onClick={() => void refresh().catch(() => {})}>重试连接</button></div>}
       {error && <div role="alert" className="error-banner"><span>{error}</span><button className="icon-button" aria-label="关闭会话错误提示" onClick={() => setError('')}><X size={15} /></button></div>}
-      {selected.archived && <div className="session-status-detail"><Archive size={14} />此联系人已归档，恢复到列表后可以继续运行。<button className="text-button" onClick={() => void patch(selected, { archived: false })}>恢复联系人</button></div>}
-      {selected.unread > 0 && <div className="session-unread-notice" role="status" aria-live="polite"><Bell size={14} /><span>这个会话有 {selected.unread} 条新提醒</span><button className="text-button" disabled={!!busy} onClick={() => void run(`read:${selected.id}`, () => api(`/sessions/${selected.id}/read`, {}))}>标为已读</button></div>}
-      {selected.statusDetail && attention(selected) && <div role="status" aria-live="polite" className="session-status-detail needs-attention"><span className={`status-point ${STATUS[selected.status].className}`} />{selected.statusDetail}<span className="source-label">{selected.statusSource === 'native' ? '后端状态' : selected.statusSource === 'terminal' ? '终端估测' : selected.statusSource === 'manual' ? '手动标记' : '进程状态'}</span></div>}
       <div className="session-conversation">
       {selected.backend === 'dsh' && !state.demo ? selected.nativeUrl ? <div className="native-web"><iframe title="DeepSeek Harness 会话" src={selected.nativeUrl} allow="clipboard-read; clipboard-write" /></div> : <div className="terminal-empty"><BackendAvatar backend="dsh" /><h3>直接使用 Harness 原生界面</h3><p>{busy === `start:${selected.id}` ? '正在启动原生会话…' : '启动会话后，在这里继续这个联系人的上下文。'}</p></div> : privateView === 'chat' ? <Suspense fallback={<div className="loading-state"><LoaderCircle size={22} className="spin" /><p>正在加载对话…</p></div>}><CodexChatPane key={selected.id} session={selected} onTerminal={() => switchPrivateView('terminal')} onSelection={setSelection} /></Suspense> : privateView === 'conversation' ? <ConversationPane key={selected.id} session={selected} onTerminal={() => switchPrivateView('terminal')} onSelection={setSelection} /> : codexChatAvailable && selected.running && selected.interactionMode === 'chat' ? <div className="terminal-empty"><Command size={26} /><h3>连接同一个 Codex 会话</h3><button className="button primary" disabled={!!busy} onClick={() => switchPrivateView('terminal')}>连接原生终端</button></div> : <TerminalPane key={selected.id} sessionId={selected.id} running={selected.running} status={selected.status} allowImages={selected.backend === 'codex' && !state.demo} onSelection={setSelection} />}
       </div>
@@ -611,20 +607,17 @@ function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArch
     return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape); };
   }, [menu]);
   const preview = session.statusDetail || (session.forkPending ? '启动时将通过原生能力分叉上下文' : session.nativeSessionId ? '上下文已连接，点击继续' : '准备就绪，点击进入会话');
-  return <article onClick={(event) => { if (!(event.target as Element).closest('button, a, .dropdown-menu')) onOpen(event.currentTarget.querySelector<HTMLButtonElement>('.card-main') ?? undefined); }} className={`session-card tone-${STATUS[session.status].className} ${attention(session) ? 'has-attention' : ''} ${session.unread > 0 && !session.archived ? 'has-unread' : ''} ${session.archived ? 'archived-card' : ''}`}>
+  return <article onClick={(event) => { if (!(event.target as Element).closest('button, a, .dropdown-menu')) onOpen(event.currentTarget.querySelector<HTMLButtonElement>('.card-main') ?? undefined); }} className={`session-card tone-${STATUS[session.status].className} ${attention(session) ? 'has-attention' : ''} ${pending(session) && !session.archived ? 'has-unread' : ''} ${session.archived ? 'archived-card' : ''}`}>
     <div className="card-head">
-      <span className="avatar-wrap"><BackendAvatar backend={session.backend} />{session.unread > 0 && <span className="unread-badge" aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</span>}</span>
+      <span className="avatar-wrap"><BackendAvatar backend={session.backend} />{pending(session) && <span className="unread-badge" aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</span>}</span>
       <div className="card-title">
         <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={(event) => onOpen(event.currentTarget)}><h3 title={session.title}>{session.title}</h3></button><button className={`icon-button card-pin ${session.pinned ? 'pinned' : ''}`} aria-label={session.pinned ? `取消置顶 ${session.title}` : `置顶 ${session.title}`} aria-pressed={session.pinned} title={session.pinned ? '取消置顶' : '置顶到最前'} onClick={onPin}>{session.pinned ? <Pin size={12} className="pinned-icon" /> : <PinOff size={12} />}</button></div>
-        <dl className="card-meta">
-          <div className="card-directory"><dt>目录</dt><dd title={session.cwd}>{shortPath(session.cwd)}</dd><button className="icon-button card-copy-directory" aria-label={`复制 ${session.title} 的工作目录`} title={`复制工作目录：${session.cwd}`} onClick={onCopyDirectory}><Copy size={12} /></button></div>
-        </dl>
+        {session.lastUserInput && <div className="card-prompt"><p title={session.lastUserInput}>{session.lastUserInput}</p></div>}
       </div>
-      <span className="card-state"><StatusBadge session={session} /></span>
+      {session.status !== 'idle' && session.status !== 'stopped' && <span className="card-state"><StatusBadge session={session} /></span>}
     </div>
-    {session.lastUserInput && <div className="card-prompt"><span>最近输入</span><p title={session.lastUserInput}>{session.lastUserInput}</p></div>}
-    <div className="card-activity"><span className="activity-chip" title={preview}>{preview}</span><time dateTime={session.lastActivity} title={new Date(session.lastActivity).toLocaleString('zh-CN')}>{relativeTime(session.lastActivity)}</time>
-      <span className="card-menu-anchor" ref={menuRef}><button ref={menuButtonRef} className="icon-button" aria-label={`${session.title} 的更多操作`} aria-expanded={menu} onClick={() => setMenu(!menu)}><Ellipsis size={15} /></button>{menu && <div className="dropdown-menu"><button onClick={() => { menuButtonRef.current?.focus(); onRename(); setMenu(false); }}><Pencil size={14} />改名</button><button onClick={() => { menuButtonRef.current?.focus(); onPin(); setMenu(false); }}><Pin size={14} />{session.pinned ? '取消置顶' : '置顶联系人'}</button><button disabled={!canFork} title={canFork ? undefined : !session.nativeSessionId || session.forkPending ? '请先启动原生会话并完成初始化' : '该后端暂不可 Fork'} onClick={() => { menuButtonRef.current?.focus(); onFork(); setMenu(false); }}><GitFork size={14} />Fork 会话</button><button onClick={() => { menuButtonRef.current?.focus(); onShare(); setMenu(false); }}><Link2 size={14} />分享会话</button><span /><button onClick={() => { onArchive(); setMenu(false); }}><Archive size={14} />{session.archived ? '恢复到列表' : '归档联系人'}</button></div>}</span></div>
+    <div className="card-activity"><span className="activity-chip" title={`${preview}\n${session.cwd}`}>{preview}</span><time dateTime={session.lastActivity} title={new Date(session.lastActivity).toLocaleString('zh-CN')}>{relativeTime(session.lastActivity)}</time>
+      <span className="card-menu-anchor" ref={menuRef}><button ref={menuButtonRef} className="icon-button" aria-label={`${session.title} 的更多操作`} aria-expanded={menu} onClick={() => setMenu(!menu)}><Ellipsis size={15} /></button>{menu && <div className="dropdown-menu"><button onClick={() => { menuButtonRef.current?.focus(); onRename(); setMenu(false); }}><Pencil size={14} />改名</button><button onClick={() => { menuButtonRef.current?.focus(); onPin(); setMenu(false); }}><Pin size={14} />{session.pinned ? '取消置顶' : '置顶联系人'}</button><button disabled={!canFork} title={canFork ? undefined : !session.nativeSessionId || session.forkPending ? '请先启动原生会话并完成初始化' : '该后端暂不可 Fork'} onClick={() => { menuButtonRef.current?.focus(); onFork(); setMenu(false); }}><GitFork size={14} />Fork 会话</button><button aria-label={`复制 ${session.title} 的工作目录`} title={session.cwd} onClick={() => { menuButtonRef.current?.focus(); onCopyDirectory(); setMenu(false); }}><Copy size={14} />复制工作目录</button><button onClick={() => { menuButtonRef.current?.focus(); onShare(); setMenu(false); }}><Link2 size={14} />分享会话</button><span /><button onClick={() => { onArchive(); setMenu(false); }}><Archive size={14} />{session.archived ? '恢复到列表' : '归档联系人'}</button></div>}</span></div>
   </article>;
 }
 

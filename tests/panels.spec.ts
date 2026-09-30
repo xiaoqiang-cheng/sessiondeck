@@ -201,9 +201,10 @@ test('notification sounds work without system notification permission and respec
     Object.defineProperty(window, 'EventSource', { configurable: true, value: StateSource });
   });
   await page.route('**/api/state', route => route.fulfill({ json: state }));
-  await page.goto('/');
+  // Sound and notification toggles live in settings; reminders still fire from any view.
+  await page.goto('/#/backends');
   await expect(page.getByRole('button', { name: '关闭提示音', exact: true })).toBeVisible();
-  await page.getByLabel('搜索联系人', { exact: true }).click();
+  await page.getByRole('button', { name: '关闭提示音', exact: true }).focus();
   session.status = 'waiting_input'; session.unread++;
   const publish = () => page.evaluate(snapshot => (window as unknown as { panelSource: EventTarget }).panelSource.dispatchEvent(new MessageEvent('state', { data: JSON.stringify(snapshot) })), state);
   await publish(); await publish();

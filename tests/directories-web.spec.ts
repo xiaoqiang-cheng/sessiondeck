@@ -95,8 +95,10 @@ test('card directory copy keeps the card closed with modern clipboard and the HT
   const state = await (await request.get('/api/state')).json() as AppState;
   const source = state.sessions.find(session => session.title === 'SessionDeck · 开发笔记')!;
   await page.goto('/');
+  // The directory lives in the card menu now; the card itself stays closed.
   const copy = page.getByRole('button', { name: `复制 ${source.title} 的工作目录`, exact: true });
   for (const mode of ['modern', 'unavailable', 'denied'] as const) {
+    await page.getByRole('button', { name: `${source.title} 的更多操作`, exact: true }).click();
     await page.evaluate(mode => {
       const state = window as unknown as { copiedDirectory: string | null; copyMethod: string | null };
       state.copiedDirectory = null; state.copyMethod = null;
@@ -117,7 +119,8 @@ test('card directory copy keeps the card closed with modern clipboard and the HT
     expect(await page.evaluate(() => (window as unknown as { copyMethod: string | null }).copyMethod)).toBe(mode === 'modern' ? 'modern' : 'fallback');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.getByRole('status').filter({ hasText: '已复制工作目录' })).toBeVisible();
-    await expect(copy).toBeFocused();
+    // The menu closes after copying and hands focus back to its button.
+    await expect(page.getByRole('button', { name: `${source.title} 的更多操作`, exact: true })).toBeFocused();
     expect(await page.locator('textarea').count()).toBe(0);
   }
 });
@@ -160,7 +163,6 @@ test('contact cards expose and search the latest prompt without overflowing narr
   const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: contact.title, exact: true }) });
   await expect(card.locator('.card-prompt p')).toHaveText(latestPrompt);
   await expect(card.locator('.card-prompt p')).toHaveAttribute('title', latestPrompt);
-  await expect(card.getByText('最近输入', { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(await card.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);

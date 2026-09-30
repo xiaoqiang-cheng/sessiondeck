@@ -178,9 +178,9 @@ test('running contacts require stopping before archive, and restoring does not r
     await page.getByRole('button', { name: '归档联系人', exact: true }).click();
     await expect(page.getByRole('button', { name: `进入 ${session.title} 的会话`, exact: true })).not.toBeVisible();
     await page.goto(`/#/archive?session=${session.id}`);
-    await expect(page.getByText('此联系人已归档，恢复到列表后可以继续运行。')).toBeVisible();
+    await expect(page.getByRole('button', { name: '已归档 · 恢复联系人', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '启动原生会话', exact: true })).toBeDisabled();
-    await page.getByRole('button', { name: '恢复联系人', exact: true }).click();
+    await page.getByRole('button', { name: '已归档 · 恢复联系人', exact: true }).click();
     await expect(page.getByRole('button', { name: '启动原生会话', exact: true })).toBeEnabled();
     current = (await readState(page.request)).sessions.find(item => item.id === session.id)!;
     expect(current.archived).toBe(false); expect(current.running).toBe(false);
@@ -291,21 +291,25 @@ test('a background tab refreshes on return and keeps new in-app attention visibl
     document.dispatchEvent(new Event('visibilitychange'));
     (window as unknown as { recoverySource: EventSource }).recoverySource.dispatchEvent(new MessageEvent('state', { data: JSON.stringify(snapshot) }));
   }, state);
-  await expect(page.locator('.session-unread-notice')).toContainText('1 条新提醒');
+  // A hidden tab never reads on the user's behalf: the tab badge stays red.
+  await expect(page.getByRole('tab', { name: new RegExp(session.title) }).locator('b')).toHaveCount(0);
+  await expect(page.locator('.session-tab.active')).toHaveCount(1);
+  let reads = 0;
+  await page.route(`**/api/sessions/${session.id}/read`, route => {
+    reads++;
+    state = { ...state, sessions: state.sessions.map(item => item.id === session.id ? { ...item, unread: 0 } : item) };
+    return route.fulfill({ json: state.sessions.find(item => item.id === session.id) });
+  });
+  expect(reads).toBe(0);
   state = { ...state, sessions: state.sessions.map(item => item.id === session.id ? { ...item, statusDetail: '恢复前台后已同步到最新结果', unread: 2 } : item) };
   await page.evaluate(() => {
     (window as unknown as { recoveryVisibility: DocumentVisibilityState }).recoveryVisibility = 'visible';
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await expect(page.locator('.session-unread-notice')).toContainText('2 条新提醒');
+  // Coming back to the open session shows the latest status inline and reads it.
   await expect(page.getByRole('dialog').locator('.session-status-detail')).toContainText('恢复前台后已同步到最新结果');
+  await expect.poll(() => reads).toBeGreaterThan(0);
   await page.screenshot({ path: 'artifacts/session-unread.png', fullPage: true });
-  await page.route(`**/api/sessions/${session.id}/read`, route => {
-    state = { ...state, sessions: state.sessions.map(item => item.id === session.id ? { ...item, unread: 0 } : item) };
-    return route.fulfill({ json: state.sessions.find(item => item.id === session.id) });
-  });
-  await page.getByRole('button', { name: '标为已读', exact: true }).click();
-  await expect(page.locator('.session-unread-notice')).not.toBeVisible();
   await expect(page.getByRole('dialog').locator('.status-badge')).toHaveText('等待输入');
 });
 

@@ -132,7 +132,7 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 
 /* ——— Cards: dense device-console tiles with IM unread cues ——— */
 .contact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
-.session-card { --ring: var(--accent); --tone: var(--line-strong); position: relative; display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 10px 12px; background: var(--bg); border-radius: 11px; border-top: 2px solid var(--tone); box-shadow: var(--shadow); cursor: pointer; transition: box-shadow .15s; }
+.session-card { --ring: var(--red); --tone: var(--line-strong); position: relative; display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 10px 12px; background: var(--bg); border-radius: 11px; border-top: 2px solid var(--tone); box-shadow: var(--shadow); cursor: pointer; transition: box-shadow .15s; }
 .session-card:hover { box-shadow: var(--shadow-lift); }
 .session-card.tone-running { --tone: var(--green); }
 .session-card.tone-waiting { --tone: var(--accent); }
@@ -160,7 +160,7 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .card-state { flex-shrink: 0; padding-top: 2px; }
 .card-state .status-badge { font-size: 11.5px; }
 .card-activity { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.activity-chip { min-width: 0; max-width: 68%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--accent); background: var(--accent-soft); border-radius: 8px; padding: 2px 7px; }
+.activity-chip { min-width: 0; max-width: 68%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--muted); background: var(--subtle); border-radius: 8px; padding: 2px 7px; }
 .tone-error .activity-chip { color: var(--red); background: #ffecea; }
 .tone-running .activity-chip { color: #248a3d; background: #e3f7e8; }
 .card-activity time { margin-left: auto; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -238,6 +238,10 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .drawer-title .rename-button { width: 22px; height: 22px; opacity: 0; }
 .drawer-title:hover .rename-button, .drawer-title .rename-button:focus-visible { opacity: 1; }
 .drawer-title .status-badge { flex-shrink: 0; margin-left: 4px; }
+.session-meta .session-status-detail { flex: 0 1 auto; min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; padding: 1px 7px; border-radius: 6px; background: var(--subtle); color: var(--muted); font-size: 11.5px; }
+.session-meta .session-status-detail.needs-attention { background: #fdf6e8; color: #7a5310; }
+.notify-toggles { display: flex; flex-wrap: wrap; gap: 8px; }
+.notify-toggles .button.active { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft); }
 .session-meta { display: flex; flex: 1 1 0; align-items: center; gap: 10px; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .session-meta>span { flex-shrink: 0; }
 .session-cwd, .session-meta-link { display: inline-flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 5px; margin: 0 -5px; border-radius: 5px; color: var(--muted); font-size: 12px; }
@@ -653,9 +657,8 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .search-field kbd, .backend-tabs button { white-space: nowrap; }
 .card-meta .card-directory { min-width: 0; }
 .card-copy-directory { width: 24px; height: 24px; margin: -3px 0; }
-.card-prompt { padding: 3px 0 0; display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
-.card-prompt>span { flex-shrink: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
-.card-prompt p { color: var(--text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; }
+.card-prompt { padding: 2px 0 0; display: flex; min-width: 0; }
+.card-prompt p { color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; }
 .private-view-switch { display: inline-flex; flex-shrink: 0; gap: 1px; padding: 2px; border-radius: 8px; background: var(--subtle); }
 .private-view-switch button { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12px; color: var(--muted); }
 .private-view-switch button[aria-pressed="true"] { color: var(--text); background: var(--bg); font-weight: 600; box-shadow: 0 1px 2px #0000001f; }
