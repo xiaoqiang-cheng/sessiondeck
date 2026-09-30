@@ -723,3 +723,4 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .terminal-send { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 38px; height: 38px; border-radius: 10px; background: var(--accent); color: #fff; }
 .terminal-send:hover:not(:disabled) { background: var(--accent-dark); }
 @media (max-width: 720px) { .terminal-composer { padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); } }
+@media (pointer: coarse) { .terminal-container { touch-action: none; overscroll-behavior: contain; } }

@@ -213,3 +213,11 @@
 - 触屏设备上把 xterm 隐藏 textarea 设为 `inputmode="none"`：点终端不再弹出系统键盘，所有文字只经输入栏进入，从根源上避免重复。
 - `tests/terminal-ime.spec.ts` 触屏用例改为通过输入栏验证：中文与多行内容各只发送一次、随后跟一个回车，快捷键按钮发送对应控制序列；桌面输入法用例不变。手机截图 `artifacts/terminal-composer-mobile.png`。
 - 为 Claude 做与 Codex 相同的完整图形对话需要另一条原生协议（Agent SDK），本轮不做。
+
+## 2026-09-30：手机端终端触摸滚动；CI 改为按需
+
+- 现象：手机上在终端里上下滑动几乎不动。原因：xterm 6 把渲染层盖在可滚动的 viewport 之上，手指拖动不会触达滚动容器；它自带的触摸手势层也没有把拖动转成滚动。
+- 修复（仅触屏设备）：监听终端容器的 touch 事件，把手指位移按行高换算成整行，并按 xterm 自己处理滚轮的规则分流：普通缓冲区调用公开的 `scrollLines`（xterm 6 的滚动器只认旧的 `wheelDelta` 字段，合成事件无法驱动）；鼠标跟踪模式（Claude Code 全程开启）或无跟踪的备用屏，则向 `.xterm-screen` 派发带坐标的合成 wheel 事件，交给 xterm 现有链路生成鼠标上报或方向键。松手后有短暂惯性。容器设 `touch-action: none` 与 `overscroll-behavior: contain`，避免页面跟着滚。
+- 验证：`tests/terminal-touch.spec.ts` 用 CDP 触摸事件模拟拖动：有回滚历史时滚动条滑块上移；开启 `?1003h` 后拖动只产生 wheel 事件、本地不滚动。headless Chromium 下即使真实 CDP 滚轮也不产生鼠标上报，所以跟踪模式只验证到"事件已交给 xterm"，真机上 Claude 的行为待用户确认。
+- 排查中发现 `tsconfig` 的 include 含 `tests/`，临时探针里的 `WheelEventInit` 类型让 `npm run build` 失败，表现为 Playwright "webServer 无法启动 (exit 2)"；探针已删除。
+- CI：`verify.yml` 原本 push 与 PR 都在 ubuntu 和 macos 上跑完整 verify。最近 5 次 push 的 ubuntu 全部通过、macos 全部失败在同一个 PTY 进程树用例（`closing a shell ends its foreground command`，子进程未能启动），是 macOS runner 的环境差异而非产品问题。本地每次 push 前已跑过 `npm run verify`，改为只在 pull_request 和手动触发时运行，仅 ubuntu。

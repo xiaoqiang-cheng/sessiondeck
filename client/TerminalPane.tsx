@@ -8,6 +8,77 @@ import { MAX_TERMINAL_IMAGE_BYTES, TERMINAL_IMAGE_TYPES } from '../shared/termin
 
 const touchDevice = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches;
 
+/**
+ * Touch scrolling. xterm stacks its screen above the scrollable viewport, so a
+ * finger drag on the terminal moves nothing by itself. Drags are turned into
+ * whole rows and routed the way xterm routes a wheel: a mouse-tracking app
+ * (Claude Code) gets wheel reports and an alternate screen without tracking
+ * gets arrow keys, both through a synthetic wheel event that xterm's own
+ * handlers read; a normal buffer scrolls through the public scrollLines API,
+ * because xterm 6's scroller only trusts the legacy wheelDelta fields that a
+ * synthetic event leaves at zero. A short momentum phase follows the finger.
+ */
+function attachTouchScroll(container: HTMLElement, terminal: Terminal) {
+  let tracking = false, lastX = 0, lastY = 0, lastTime = 0, velocity = 0, pending = 0, frame = 0;
+  const rowHeight = () => {
+    const screen = terminal.element?.querySelector<HTMLElement>('.xterm-screen');
+    return screen && terminal.rows && screen.clientHeight ? screen.clientHeight / terminal.rows : 18;
+  };
+  // dy is finger travel in px; content follows the finger, so finger down
+  // means wheel up (negative deltaY). Whole rows keep every mode consistent.
+  const emit = (dy: number) => {
+    pending -= dy;
+    const height = rowHeight();
+    const rows = Math.trunc(pending / height);
+    if (!rows) return;
+    pending -= rows * height;
+    const trackingApp = terminal.modes.mouseTrackingMode !== 'none';
+    if (!trackingApp && terminal.buffer.active.type === 'normal') { terminal.scrollLines(rows); return; }
+    // Coordinates matter: the tracking report is dropped when the event falls
+    // outside the screen.
+    const target = terminal.element?.querySelector('.xterm-screen') ?? terminal.element;
+    target?.dispatchEvent(new WheelEvent('wheel', { deltaY: rows, deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true, clientX: lastX, clientY: lastY }));
+  };
+  const stopMomentum = () => { if (frame) cancelAnimationFrame(frame); frame = 0; };
+  const start = (event: TouchEvent) => {
+    if (event.touches.length !== 1) { tracking = false; return; }
+    stopMomentum(); tracking = true; velocity = 0; pending = 0;
+    lastX = event.touches[0].clientX; lastY = event.touches[0].clientY; lastTime = event.timeStamp;
+  };
+  const move = (event: TouchEvent) => {
+    if (!tracking || event.touches.length !== 1) return;
+    const y = event.touches[0].clientY;
+    const dy = y - lastY, dt = Math.max(1, event.timeStamp - lastTime);
+    velocity = 0.7 * (dy / dt) + 0.3 * velocity;
+    lastX = event.touches[0].clientX; lastY = y; lastTime = event.timeStamp;
+    event.preventDefault();
+    emit(dy);
+  };
+  const end = () => {
+    if (!tracking) return;
+    tracking = false;
+    if (Math.abs(velocity) < 0.25) return;
+    let previous = performance.now(), v = velocity;
+    const step = (now: number) => {
+      const dt = Math.min(64, now - previous); previous = now;
+      emit(v * dt);
+      v *= Math.pow(0.93, dt / 16);
+      frame = Math.abs(v) > 0.03 ? requestAnimationFrame(step) : 0;
+    };
+    frame = requestAnimationFrame(step);
+  };
+  const cancel = () => { tracking = false; };
+  container.addEventListener('touchstart', start, { passive: true });
+  container.addEventListener('touchmove', move, { passive: false });
+  container.addEventListener('touchend', end);
+  container.addEventListener('touchcancel', cancel);
+  return () => {
+    stopMomentum();
+    container.removeEventListener('touchstart', start); container.removeEventListener('touchmove', move);
+    container.removeEventListener('touchend', end); container.removeEventListener('touchcancel', cancel);
+  };
+}
+
 export default function TerminalPane({ sessionId, running, status, allowImages: imagesRequested, onSelection, channel = 'session', onExit, focusRequest, readOnly: readOnlyRequested = false }: {
   sessionId: string; running: boolean; status?: string; allowImages?: boolean; onSelection: (text: string) => void;
   channel?: 'session' | 'shell'; onExit?: (exitCode: number) => void; focusRequest?: number;
@@ -91,6 +162,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     // composer below instead; the hidden textarea keeps focus for the caret
     // and hardware keys but never raises the on-screen keyboard.
     if (touchDevice) terminal.textarea?.setAttribute('inputmode', 'none');
+    const detachTouchScroll = touchDevice ? attachTouchScroll(containerRef.current, terminal) : null;
     terminalRef.current = terminal;
     fitRef.current = fit;
     function resize() {
@@ -175,7 +247,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages: 
     void connect();
     return () => {
       disposed = true; clearTimeout(reconnect); clearTimeout(copiedTimer.current); uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; socket?.close(); input.dispose(); selection.dispose();
-      resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
+      detachTouchScroll?.(); resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
     };
   }, [sessionId, running, channel, readOnlyRequested]);
   useEffect(() => {
