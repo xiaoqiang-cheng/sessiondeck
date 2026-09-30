@@ -10,7 +10,7 @@ test('contacts, native terminal, fork and directed group collaboration work in t
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '会话联系人', exact: true })).toBeVisible();
-  await expect(page.getByText('演示模式 · 示例数据')).toBeVisible();
+  await expect(page.locator('.demo-badge')).toHaveAttribute('title', '演示模式 · 示例数据');
   await mkdir('artifacts', { recursive: true });
   await page.screenshot({ path: 'artifacts/contacts.png', fullPage: true });
 
@@ -173,7 +173,7 @@ test('group history failures have their own retry without losing the workspace',
 test('mobile navigation and the dialog stay usable at narrow widths', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   await page.goto('/');
-  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: '正在运行', exact: true }).click();
+  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: '运行中', exact: true }).click();
   await expect(page.getByRole('heading', { name: '正在运行', exact: true })).toBeVisible();
   await expect(page.getByText('目前没有正在执行的任务')).toBeVisible();
   await page.getByRole('button', { name: '新建联系人', exact: true }).click();
@@ -181,8 +181,14 @@ test('mobile navigation and the dialog stay usable at narrow widths', async ({ p
   await expect(dialog.getByLabel('联系人名称')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
-  await expect(page.getByRole('navigation', { name: '协作群组', exact: true })).toBeVisible();
+  // On a phone the primary tabs sit in a bottom bar and "+" stays reachable;
+  // groups live in the desktop rail only.
+  await expect(page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: '联系人', exact: true })).toBeInViewport();
+  await expect(page.getByRole('button', { name: '新建联系人', exact: true })).toBeInViewport();
+  await expect(page.getByRole('navigation', { name: '协作群组', exact: true })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByRole('navigation', { name: '协作群组', exact: true })).toBeVisible();
 });
 
 test('session bookmarks reload the same private context and browser history restores routes without starting a process', async ({ page }) => {
@@ -316,9 +322,9 @@ test('contact sorting and filters persist across reload with separate filters fo
   await expect(page.getByLabel('按状态筛选')).toHaveValue('idle');
   await expect(page.locator('.backend-tabs').getByRole('button', { name: 'Codex', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.keyboard.press('Escape');
-  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /^需要你处理/ }).click();
+  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /^待处理/ }).click();
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('');
-  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /会话联系人/ }).click();
+  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /^联系人/ }).click();
   await expect(page.getByLabel('搜索联系人', { exact: true })).toHaveValue('排序');
   await page.getByLabel('搜索联系人', { exact: true }).fill('查无结果 xyz');
   await expect(page.getByText('没有找到匹配的联系人')).toBeVisible();
@@ -390,6 +396,7 @@ test('many cards and long names, paths and group titles remain within desktop an
     expect(await page.locator('.session-card h3').first().evaluate(element => element.clientHeight < 60)).toBeTruthy();
   }
   await page.screenshot({ path: 'artifacts/long-contacts-mobile.png', animations: 'disabled' });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole('navigation', { name: '协作群组', exact: true }).getByRole('button', { name: new RegExp(longGroup) }).click();
   await expect(page.getByLabel('群组消息')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -500,7 +507,7 @@ test('execution filters distinguish an attached idle process from an active task
   });
   await page.goto('/#/running');
   await expect(page.locator('.session-card h3')).toHaveText(['真正执行任务']);
-  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /会话联系人/ }).click();
+  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /^联系人/ }).click();
   await page.getByRole('button', { name: '筛选与排序', exact: true }).click();
   await page.getByLabel('按状态筛选').selectOption('unread');
   await expect(page.locator('.session-card h3')).toHaveText(['保留未读提醒']);
@@ -558,7 +565,7 @@ test('new group members inherit the group directory, while recent paths require 
   await expect(member.getByLabel('工作目录', { exact: true })).toHaveValue('/projects/user-edited');
   await member.getByRole('button', { name: '取消', exact: true }).click();
 
-  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /会话联系人/ }).click();
+  await page.getByRole('navigation', { name: '工作空间导航' }).getByRole('button', { name: /^联系人/ }).click();
   await page.getByRole('button', { name: '新建联系人', exact: true }).click();
   const create = page.getByRole('dialog', { name: '新建会话联系人' });
   await expect(create.getByLabel('工作目录', { exact: true })).toHaveValue('/default/workspace');
@@ -594,7 +601,7 @@ test('the "需要你处理" badge counts unread reminders, matching the red badg
   // Only a session that is blocked on you and not yet looked at is red; a
   // stale reminder on a running session is not. The nav badge agrees.
   await expect(page.locator('.session-card .unread-badge')).toHaveCount(1);
-  const attentionTab = nav.getByRole('button', { name: /^需要你处理/ });
+  const attentionTab = nav.getByRole('button', { name: /^待处理/ });
   await expect(attentionTab.locator('b')).toHaveText('1');
   await expect(page).toHaveTitle(/^\(1\) /);
   // Pinned first, then blocked sessions (most recent activity first), then the merely running.

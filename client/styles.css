@@ -59,7 +59,39 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ——— Shell: a single top row; everything else is content ——— */
-.app-shell { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+.app-shell { height: 100dvh; display: flex; flex-direction: row; overflow: hidden; }
+.app-column { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+/* ——— Left rail ——— */
+.rail { display: flex; flex-shrink: 0; flex-direction: column; width: 64px; padding: 10px 8px calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-right: 1px solid var(--line); overflow: hidden; transition: width .16s ease; }
+.rail:hover, .rail:focus-within { width: 208px; }
+.rail .brand { margin: 0 0 12px 4px; }
+.rail-primary, .rail-groups { display: flex; flex-direction: column; gap: 2px; }
+.rail-groups { flex: 1; min-height: 0; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); overflow-y: auto; scrollbar-width: none; }
+.rail-groups::-webkit-scrollbar { display: none; }
+.rail button { position: relative; display: flex; align-items: center; gap: 10px; width: 100%; height: 40px; padding: 0 12px; border-radius: 10px; color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; }
+.rail button svg, .rail .group-hash { flex-shrink: 0; width: 20px; text-align: center; }
+.rail button>span:not(.group-hash), .rail button>b { transition: opacity .12s ease; }
+@media (min-width: 721px) {
+  .rail:not(:hover):not(:focus-within) button>span:not(.group-hash), .rail:not(:hover):not(:focus-within) button>b { opacity: 0; }
+  /* Collapsed rail: badges become a corner dot so counts never truncate. */
+  .rail:not(:hover):not(:focus-within) button>b { opacity: 1; right: auto; left: 30px; top: 6px; min-width: 8px; height: 8px; padding: 0; font-size: 0; }
+  .rail:not(:hover):not(:focus-within) button>b:not(.alert) { display: none; }
+}
+.rail button:hover { background: var(--subtle); color: var(--text); }
+.rail button.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.rail button>b { position: absolute; right: 10px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--hover); color: var(--muted); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+.rail button.active>b { background: #d2e6ff; color: var(--accent); }
+.rail button>b.alert { background: var(--red); color: #fff; }
+.rail .group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rail .group-count { position: absolute; right: 10px; font-size: 11px; color: var(--faint); opacity: 0; }
+.rail:hover .group-count, .rail:focus-within .group-count { opacity: 1; }
+.rail .group-unread-dot { position: absolute; left: 30px; top: 8px; }
+.rail-add-group { color: var(--faint) !important; }
+.rail-footer { display: flex; flex-direction: column; align-items: center; gap: 2px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.rail-footer .more-menu .dropdown-menu { left: 48px; right: auto; top: auto; bottom: 0; }
+.rail-footer .icon-button { width: 40px; height: 40px; border-radius: 10px; }
+.topbar-title { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; }
+.topbar-title h1 { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Topbar / [explorer sidebar | main column (content + terminal dock)]. The
    sidebar spans the full body height; the terminal dock only takes space from
    the main column, as in VS Code. */
@@ -68,7 +100,7 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .workspace-area { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
 .main-content[hidden] { display: none; }
 .topbar { flex-shrink: 0; position: sticky; top: 0; z-index: 30; background: #ffffffd9; backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-bottom: 1px solid var(--line); }
-.topbar-row { display: flex; align-items: center; gap: 12px; height: 56px; max-width: 1480px; margin: 0 auto; padding: 0 28px; }
+.topbar-row { display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 16px 0 20px; }
 .brand { display: inline-flex; flex-shrink: 0; }
 .brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 9px; background: var(--accent); color: #fff; }
 .nav-scroller { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); }
@@ -608,16 +640,33 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
   .group-message { max-width: 92%; }
 }
 @media (max-width: 720px) {
-  /* App-like on a phone: the bar clears the status bar and notch, the nav
-     scrolls in one row beneath it, and the body never rubber-bands. */
-  .topbar-row { flex-wrap: wrap; height: auto; padding: calc(6px + env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left)); row-gap: 4px; }
-  .nav-scroller { order: 3; flex-basis: 100%; padding-bottom: 2px; }
-  .primary-nav button, .group-nav button { height: 30px; padding: 0 9px; font-size: 13px; }
+  /* App-like on a phone: the rail becomes a bottom tab bar, the toolbar
+     clears the status bar, and the body never rubber-bands. */
+  .app-shell { flex-direction: column; height: 100dvh; min-height: -webkit-fill-available; }
+  .app-column { order: 0; }
+  .rail { order: 1; flex-direction: row; align-items: center; width: 100% !important; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 6px env(safe-area-inset-bottom); border-right: 0; border-top: 1px solid var(--line); transition: none; }
+  .rail .brand, .rail-groups, .rail-footer .connection-indicator { display: none; }
+  .rail-primary { flex: 1; flex-direction: row; justify-content: space-around; gap: 0; }
+  .rail button { flex: 1; flex-direction: column; justify-content: center; gap: 3px; width: auto; height: 52px; padding: 0 2px; font-size: 10.5px; border-radius: 8px; }
+  .rail button>b { right: auto; left: calc(50% + 6px); top: 4px; }
+  .rail button>b:not(.alert) { display: none; }
+  .rail button.active { background: none; }
+  .rail-footer .icon-button { width: 44px; }
+  /* The action row must never push "+" off-screen: the title yields first,
+     then the search box; icons and "+" keep their size. */
+  .topbar-row { gap: 6px; }
+  .topbar-title { flex: 0 1 auto; min-width: 40px; }
+  .topbar-actions { flex: 1 1 auto; justify-content: flex-end; min-width: 0; }
+  .topbar-actions .search-field { flex: 0 1 120px; min-width: 36px; }
+  .topbar-actions .icon-button, .topbar-actions .new-contact, .topbar-actions .filter-menu { flex-shrink: 0; }
+  .topbar-actions .button { margin-left: 4px; }
+  .rail-footer { flex-direction: row; margin: 0; padding: 0; border: 0; }
+  .rail-footer .more-menu .dropdown-menu { left: auto; right: 0; bottom: 56px; }
+  .topbar-row { height: auto; min-height: 48px; padding: calc(4px + env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left)); }
+  .topbar-title h1 { font-size: 15px; }
   .topbar-actions { margin-left: auto; min-width: 0; }
   .topbar-actions .search-field { width: auto; flex: 1; min-width: 60px; }
-  .topbar-actions .connection-indicator, .demo-badge { display: none; }
-  .app-shell { height: 100dvh; min-height: -webkit-fill-available; }
-  .app-body { padding-bottom: env(safe-area-inset-bottom); }
+  .demo-badge { display: none; }
   .main-content { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
   .session-tabs { height: 40px; }
   .session-tab>button[role="tab"] { font-size: 13px; padding-left: 14px; }

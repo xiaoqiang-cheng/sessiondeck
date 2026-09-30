@@ -500,38 +500,44 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   const explorerSession = selected ?? workspaceSession;
 
   return <div className="app-shell">
+    {/* A left rail carries navigation and groups; the toolbar above the
+        content carries what acts on the current view. On phones the rail
+        becomes a bottom tab bar and the toolbar stays on top. */}
+    <nav className="rail" aria-label="工作空间导航" inert={!!modal}>
+      <a className="brand" href="#" aria-label="SessionDeck" title="SessionDeck" onClick={(event) => { event.preventDefault(); navigate('contacts'); }}><span className="brand-mark"><BrandMark /></span></a>
+      <div className="rail-primary primary-nav">
+        {tab('contacts', <MessageSquare size={18} />, '联系人', personal.length)}
+        {tab('attention', <Bell size={18} />, '待处理', needsAttention.length, true)}
+        {tab('running', <Radio size={18} />, '运行中', running.length)}
+        {tab('activity', <Clock3 size={18} />, '活动')}
+        {tab('archive', <Archive size={18} />, '归档', archived.length)}
+      </div>
+      <div className="rail-groups group-nav" role="navigation" aria-label="协作群组">
+        {state?.groups.map((group) => { const count = sessions.filter((session) => session.groupId === group.id && !session.archived).length; return <button key={group.id} title={group.goal ? `${group.title}\n${group.goal}` : group.title} aria-current={groupId === group.id ? 'page' : undefined} className={groupId === group.id ? 'active' : ''} onClick={() => navigate(`group:${group.id}`)}><span className="group-hash">#</span><span className="group-name">{group.title}</span>{sessions.some((session) => session.groupId === group.id && !session.archived && pending(session)) && <span className="group-unread-dot" aria-label="有未读提醒" title="群组成员有未读提醒" />}<span className="group-count">{count}</span></button>; })}
+        <button className="rail-add-group" disabled={!state} aria-label="创建群组" title="创建群组" onClick={() => setModal({ type: 'group' })}><Plus size={15} /><span className="group-name">新建群组</span></button>
+      </div>
+      <div className="rail-footer">
+        <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
+        <MoreMenu items={[
+          { label: '导入会话', icon: <ArrowDownToLine size={14} />, disabled: !state, onSelect: () => setModal({ type: 'import' }) },
+          { label: '连接与能力', icon: <Settings2 size={14} />, active: view === 'backends', onSelect: () => navigate('backends') },
+          { label: '使用说明与快捷键', icon: <CircleHelp size={14} />, onSelect: () => setModal({ type: 'help' }) },
+        ]} />
+      </div>
+    </nav>
+    <div className="app-column">
     <header className="topbar" inert={!!modal}>
       <div className="topbar-row">
-        <a className="brand" href="#" aria-label="SessionDeck" title="SessionDeck" onClick={(event) => { event.preventDefault(); navigate('contacts'); }}><span className="brand-mark"><BrandMark /></span></a>
-        <div className="nav-scroller">
-          <nav className="primary-nav" aria-label="工作空间导航">
-            {tab('contacts', <MessageSquare size={15} />, '会话联系人', personal.length)}
-            {tab('attention', <Bell size={15} />, '需要你处理', needsAttention.length, true)}
-            {tab('running', <Radio size={15} />, '正在运行', running.length)}
-            {tab('archive', <Archive size={15} />, '已归档', archived.length)}
-            {tab('activity', <Clock3 size={15} />, '最近活动')}
-          </nav>
-          <span className="nav-divider" aria-hidden="true" />
-          <nav className="group-nav" aria-label="协作群组">{state?.groups.map((group) => { const count = sessions.filter((session) => session.groupId === group.id && !session.archived).length; return <button key={group.id} title={group.goal ? `${group.title}\n${group.goal}` : group.title} aria-current={groupId === group.id ? 'page' : undefined} className={groupId === group.id ? 'active' : ''} onClick={() => navigate(`group:${group.id}`)}><span className="group-hash">#</span><span className="group-name">{group.title}</span>{sessions.some((session) => session.groupId === group.id && !session.archived && pending(session)) && <span className="group-unread-dot" aria-label="有未读提醒" title="群组成员有未读提醒" />}<span className="group-count">{count}</span></button>; })}</nav>
-          {currentGroup && <button className="icon-button" aria-label="编辑群组" title="编辑群组名称与目标" onClick={() => setModal({ type: 'group', group: currentGroup })}><Pencil size={14} /></button>}
-          <button className="icon-button" disabled={!state} aria-label="创建群组" title="创建群组" onClick={() => setModal({ type: 'group' })}><Plus size={16} /></button>
-        </div>
+        <div className="topbar-title"><h1>{title}</h1>{currentGroup && <button className="icon-button" aria-label="编辑群组" title="编辑群组名称与目标" onClick={() => setModal({ type: 'group', group: currentGroup })}><Pencil size={14} /></button>}{state?.demo && <span className="demo-badge" title="演示模式 · 示例数据">演示</span>}</div>
         <div className="topbar-actions">
-          <button className={`icon-button ${terminalPanelOpen ? 'active' : ''}`} aria-label="打开终端" title={terminalPanelOpen ? '终端面板已打开' : '打开底部终端'} disabled={!state} onClick={() => openTerminalPanel(selected?.id)}><PanelBottomOpen size={17} /></button>
           {listView && <><label className="search-field"><Search size={15} /><input id="session-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索" aria-label="搜索联系人" /><kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></label>
             <FilterMenu active={backendFilter !== 'all' || statusFilter !== 'all'} reset={() => { setBackendFilter('all'); setStatusFilter('all'); }}>
               <div className="filter-group"><span>后端</span><div className="backend-tabs" aria-label="按后端筛选"><button aria-pressed={backendFilter === 'all'} className={backendFilter === 'all' ? 'selected' : ''} onClick={() => setBackendFilter('all')}>全部</button>{(['claude', 'codex', 'dsh'] as Backend[]).map((backend) => <button key={backend} aria-pressed={backendFilter === backend} className={backendFilter === backend ? 'selected' : ''} onClick={() => setBackendFilter(backend)}>{BACKEND[backend].short}</button>)}</div></div>
               <label className="filter-group"><span>状态</span><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as SessionStatus | 'all' | 'attention' | 'unread')}><option value="all">全部状态</option><option value="attention">需要处理</option><option value="unread">未读提醒</option><option value="running">运行中</option><option value="waiting_input">等待输入</option><option value="waiting_approval">等待审批</option><option value="idle">空闲</option><option value="error">异常</option><option value="stopped">已停止</option><option value="unknown">状态未知</option></select></label>
               <label className="filter-group"><span>排序</span><select aria-label="联系人排序" value={contactSort} onChange={(event) => setContactSort(event.target.value as ContactSort)}><option value="activity">最近活动</option><option value="created">创建时间</option><option value="name">名称</option></select></label>
             </FilterMenu></>}
-          {state?.demo && <span className="demo-badge" title="演示模式 · 示例数据">演示模式 · 示例数据</span>}
-          <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
           <button className={`icon-button ${workspaceOpen ? 'active' : ''}`} aria-label="打开资源管理器" title="打开资源管理器" disabled={!workspaceSession} onClick={() => setWorkspaceOpen((value) => !value)}><Folder size={17} /></button>
-          <MoreMenu items={[
-            { label: '导入会话', icon: <ArrowDownToLine size={14} />, disabled: !state, onSelect: () => setModal({ type: 'import' }) },
-            { label: '连接与能力', icon: <Settings2 size={14} />, active: view === 'backends', onSelect: () => navigate('backends') },
-            { label: '使用说明与快捷键', icon: <CircleHelp size={14} />, onSelect: () => setModal({ type: 'help' }) },
-          ]} />
+          <button className={`icon-button ${terminalPanelOpen ? 'active' : ''}`} aria-label="打开终端" title={terminalPanelOpen ? '终端面板已打开' : '打开底部终端'} disabled={!state} onClick={() => openTerminalPanel(selected?.id)}><PanelBottomOpen size={17} /></button>
           <button className="button primary new-contact" aria-label="新建联系人" title="新建联系人" disabled={!state} onClick={() => setModal({ type: 'create' })}><Plus size={17} /></button>
         </div>
       </div>
@@ -542,7 +548,6 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
     <div className="app-main">
     <div className={`workspace-area ${selected ? 'session-active' : ''}`}>
     <main className="main-content" inert={!!modal} hidden={!!selected}>
-      <h1 className="sr-only">{title}</h1>
       {state && !connected && <div className="connection-banner" role="status"><Radio size={15} /><span>{hasConnected ? '服务连接已中断，正在自动重连。卡片暂时显示上次收到的状态。' : '正在建立实时连接，卡片显示最近获取的状态。'}</span><button className="text-button" onClick={() => void refresh().catch(() => {})}>重新获取</button></div>}
       {connectionError && <div role="alert" className="error-banner connection-error"><span>{connectionError}</span><button className="text-button" onClick={() => void refresh().catch(() => {})}>重试连接</button></div>}
       {error && <div role="alert" className="error-banner"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError('')}><X size={15} /></button></div>}
@@ -598,6 +603,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
     </div>
     </div>
 
+    </div>
     {modal?.type === 'help' && <HelpDialog close={closeModal} />}
     {modal?.type === 'replaceDraft' && <ModalShell title="替换当前群组草稿？" subtitle={`将 ${modal.sourceName} 的消息转交为任务，当前草稿需要先处理。`} close={closeModal}><div className="modal-fields"><p className="draft-replace-preview">{modal.draft || '当前草稿已选择接收成员。'}</p><p className="form-note">保留草稿会取消这次转交。替换后，可编辑任务内容并选择接收成员；创建任务仍需你提交。</p></div><div className="modal-footer"><button className="button secondary" onClick={closeModal}>保留当前草稿</button><button className="button primary" onClick={() => { modal.proceed(); closeModal(); }}>替换为转交任务</button></div></ModalShell>}
     {modal?.type === 'shareLink' && <ShareDialog session={modal.session} close={closeModal} notify={notify} />}
