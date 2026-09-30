@@ -22,7 +22,7 @@ interface Dependencies {
 }
 const fail = (message: string, status = 400): never => { throw Object.assign(new Error(message), { status }); };
 const requestId = (value: unknown): string => typeof value === 'string' && /^[a-zA-Z0-9_-]{16,100}$/.test(value) ? value : fail('发送标识无效');
-interface Viewer { response: express.Response; previous?: CodexChatSnapshot }
+interface Viewer { response: express.Response; previous?: CodexChatSnapshot; device?: string }
 
 export function registerCodexChat(app: express.Express, options: Dependencies) {
   const { store, bridge, conversations } = options;
@@ -125,7 +125,7 @@ export function registerCodexChat(app: express.Express, options: Dependencies) {
   app.get('/api/sessions/:id/chat/events', async (req, res) => {
     const id = String(req.params.id);
     session(id);
-    const viewer: Viewer = { response: res };
+    const viewer: Viewer = { response: res, device: typeof res.locals.device === 'string' ? res.locals.device : undefined };
     const set = viewers.get(id) ?? new Set<Viewer>(); set.add(viewer); viewers.set(id, set);
     res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Connection', 'keep-alive'); res.flushHeaders();
     const heartbeat = setInterval(() => { if (!res.destroyed) res.write(': heartbeat\n\n'); }, 20_000);
@@ -171,7 +171,10 @@ export function registerCodexChat(app: express.Express, options: Dependencies) {
     await bridge.stopSession(item.nativeSessionId!);
     res.json({ ok: true });
   });
-  return { close() {
+  return { revalidate(valid: (device: string) => boolean) {
+    // Revoked share devices stop receiving the native chat stream immediately.
+    for (const set of viewers.values()) for (const viewer of set) if (viewer.device && !valid(viewer.device)) viewer.response.end();
+  }, close() {
     offChat(); offStore();
     for (const timer of scheduled.values()) clearTimeout(timer);
     scheduled.clear();

@@ -4,7 +4,7 @@ import {
   CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
   GitFork, Layers3, LoaderCircle, MessageSquare, Pencil, Pin, Play, Plus,
   Radio, Search, Send, Settings2, Share2, SlidersHorizontal, Square, UsersRound, X,
-  PanelBottomOpen, Volume2, VolumeX, TerminalSquare,
+  PanelBottomOpen, Volume2, VolumeX, TerminalSquare, Link2,
 } from 'lucide-react';
 import type { AppState, StatePatch, Backend, DiscoveredSession, Delivery, Group, GroupDetail, GroupMessage, Session, SessionStatus } from '../shared/types';
 import { applyStatePatch } from './state';
@@ -20,22 +20,25 @@ import WorkspaceExplorer from './WorkspaceExplorer';
 import ShellTerminalDock from './ShellTerminalDock';
 import { useContactFilters, useContactSort, type ContactSort } from './preferences';
 import { readLocalPreference, writeLocalPreference, useDialog } from './ui';
+import ModalShell from './Modal';
+import { SecuritySettings, ShareDialog } from './Sharing';
+import type { AuthStatus } from '../shared/auth';
 
 const CodexChatPane = lazy(() => import('./CodexChatPane'));
 
-const BACKEND: Record<Backend, { name: string; short: string; glyph: string; color: string }> = {
+export const BACKEND: Record<Backend, { name: string; short: string; glyph: string; color: string }> = {
   claude: { name: 'Claude Code', short: 'Claude', glyph: '✳', color: 'coral' },
   codex: { name: 'Codex', short: 'Codex', glyph: '⌘', color: 'green' },
   dsh: { name: 'DeepSeek Harness', short: 'DeepSeek', glyph: '≈', color: 'blue' },
 };
-const STATUS: Record<SessionStatus, { label: string; className: string }> = {
+export const STATUS: Record<SessionStatus, { label: string; className: string }> = {
   idle: { label: '空闲', className: 'idle' }, running: { label: '运行中', className: 'running' },
   waiting_input: { label: '等待输入', className: 'waiting' }, waiting_approval: { label: '等待审批', className: 'waiting' },
   error: { label: '异常', className: 'error' }, stopped: { label: '已停止', className: 'idle' }, unknown: { label: '状态未知', className: 'unknown' },
 };
 type Modal = { type: 'create'; groupId?: string; backend?: Backend } | { type: 'import' } | { type: 'rename'; session: Session }
   | { type: 'fork'; session: Session; groupId?: string } | { type: 'group'; group?: Group }
-  | { type: 'replaceDraft'; draft: string; sourceName: string; proceed: () => void } | { type: 'help' } | { type: 'addMember'; groupId: string } | { type: 'share'; session: Session; text: string } | null;
+  | { type: 'replaceDraft'; draft: string; sourceName: string; proceed: () => void } | { type: 'help' } | { type: 'shareLink'; session: Session } | { type: 'addMember'; groupId: string } | { type: 'share'; session: Session; text: string } | null;
 type GroupDraft = { text: string; kind: GroupMessage['kind']; recipients: string[]; sourceMessageId: string | null };
 function readGroupDraft(groupId: string): GroupDraft {
   try {
@@ -62,20 +65,12 @@ const relativeTime = (value: string) => {
 };
 const shortPath = (path: string) => path.replace(/\/$/, '').split('/').filter(Boolean).slice(-2).join('/') || path;
 
-function BackendAvatar({ backend, small = false }: { backend: Backend; small?: boolean }) {
+export function BackendAvatar({ backend, small = false }: { backend: Backend; small?: boolean }) {
   return <span className={`backend-avatar ${BACKEND[backend].color} ${small ? 'small' : ''}`} aria-label={BACKEND[backend].name}>{BACKEND[backend].glyph}</span>;
 }
-function StatusBadge({ session }: { session: Session }) {
+export function StatusBadge({ session }: { session: Session }) {
   return <span className={`status-badge ${STATUS[session.status].className}`} title={`${session.statusDetail || STATUS[session.status].label} · ${session.statusSource === 'native' ? '来自后端' : session.statusSource === 'terminal' ? '根据终端输出推测' : session.statusSource === 'manual' ? '手动设置' : '进程状态'}`}><i />{STATUS[session.status].label}{session.statusSource === 'terminal' && <span className="estimated">估测</span>}</span>;
 }
-function ModalShell({ title, subtitle, close, children, wide = false }: { title: string; subtitle?: string; close: () => void; children: ReactNode; wide?: boolean }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useDialog(ref, true, close);
-  return <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><div ref={ref} className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
-    <div className="modal-heading"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" aria-label="关闭" onClick={close}><X size={20} /></button></div>{children}
-  </div></div>;
-}
-
 function HelpDialog({ close }: { close: () => void }) {
   return <ModalShell title="使用说明与快捷键" subtitle="在卡片上看状态，进入原生会话继续工作。" close={close}>
     <div className="help-content">
@@ -90,7 +85,7 @@ function HelpDialog({ close }: { close: () => void }) {
   </ModalShell>;
 }
 
-export default function App() {
+export default function App({ auth = { kind: 'owner', remote: false, passwordSet: false } }: { auth?: Extract<AuthStatus, { kind: 'owner' }> }) {
   const [state, setState] = useState<AppState | null>(null);
   const { view, selectedId, updateRoute } = useWorkspaceRoute();
   const setSelectedId = useCallback((id: string | null) => updateRoute({ selectedId: id }), [updateRoute]);
@@ -513,8 +508,8 @@ export default function App() {
       {error && <div role="alert" className="error-banner"><span>{error}</span><button className="icon-button" aria-label="关闭错误提示" onClick={() => setError('')}><X size={15} /></button></div>}
 
       {!state && !connectionError && <div className="loading-state"><LoaderCircle className="spin" size={22} /><p>正在连接你的工作空间…</p></div>}
-      {state && view === 'activity' ? <ActivityView activities={state.activities} sessions={state.sessions} open={openSession} /> : state && view === 'backends' ? <BackendSettings state={state} refresh={() => void run('refresh', () => api('/backends/refresh', {}), '已重新检测本机后端')} onCreate={(backend) => { setBackendFilter(backend); setModal({ type: 'create', backend }); }} /> : state && <>
-          {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={(invoker) => openSession(session, invoker)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
+      {state && view === 'activity' ? <ActivityView activities={state.activities} sessions={state.sessions} open={openSession} /> : state && view === 'backends' ? <><BackendSettings state={state} refresh={() => void run('refresh', () => api('/backends/refresh', {}), '已重新检测本机后端')} onCreate={(backend) => { setBackendFilter(backend); setModal({ type: 'create', backend }); }} /><div className="backend-settings"><SecuritySettings auth={auth} notify={notify} /></div></> : state && <>
+          {visible.length > 0 ? <div className="contact-grid">{visible.map((session) => <SessionCard key={session.id} session={session} onShare={() => setModal({ type: 'shareLink', session })} canFork={state.backends.find((backend) => backend.id === session.backend)?.capabilities.fork && !!session.nativeSessionId && !session.forkPending || false} onOpen={(invoker) => openSession(session, invoker)} onRename={() => setModal({ type: 'rename', session })} onFork={() => setModal({ type: 'fork', session, groupId: session.groupId ?? undefined })} onPin={() => void patch(session, { pinned: !session.pinned })} onArchive={() => void patch(session, { archived: !session.archived })} onCopyDirectory={() => void copyText(session.cwd, '工作目录')} />)}{currentGroup && <button className="add-member-card" onClick={() => setModal({ type: 'addMember', groupId: currentGroup.id })}><Plus size={20} /><span>添加成员</span></button>}</div> : <EmptyState filtered={filtered} view={view} group={!!currentGroup} backendCount={state.backends.filter((backend) => backend.installed).length} connections={() => navigate('backends')} create={() => setModal(currentGroup ? { type: 'addMember', groupId: currentGroup.id } : { type: 'create' })} importSessions={() => setModal({ type: 'import' })} clear={clearFilters} />}
 
           {currentGroup && groupError && <div className="error-banner" role="alert"><span>群组动态加载失败：{groupError}</span><button className="text-button" onClick={() => setGroupReload((value) => value + 1)}>重试群组动态</button></div>}
           {currentGroup && !groupError && (!detail || detail.group.id !== currentGroup.id) && <div className="loading-state" role="status"><LoaderCircle size={20} className="spin" /><p>正在读取群组动态…</p></div>}
@@ -536,7 +531,7 @@ export default function App() {
       <header className="drawer-header">
         <div className="drawer-heading-text">
           <div className="drawer-title"><h2 title={selected.title}>{selected.title}</h2><button className="icon-button rename-button" title="改名" aria-label="改名" onClick={() => setModal({ type: 'rename', session: selected })}><Pencil size={12} /></button><StatusBadge session={selected} /></div>
-          <nav className="session-meta" aria-label="会话关系"><span>{BACKEND[selected.backend].short}</span><button className="session-cwd" aria-label="复制工作目录" title={`${selected.cwd}\n点击复制`} onClick={() => void copyText(selected.cwd, '工作目录')}><Folder size={12} /><span>{selected.cwd}</span></button>{selectedGroup && <button className="session-meta-link" onClick={() => navigate(`group:${selectedGroup.id}`)}><UsersRound size={12} />{selectedGroup.title}</button>}{selectedParent && <button className="session-meta-link" onClick={() => openSession(selectedParent)}><GitFork size={12} />来源：{selectedParent.title}</button>}</nav>
+          <nav className="session-meta" aria-label="会话关系"><span>{BACKEND[selected.backend].short}</span><button className="session-cwd" aria-label="复制工作目录" title={`${selected.cwd}\n点击复制`} onClick={() => void copyText(selected.cwd, '工作目录')}><Folder size={12} /><span><bdi>{selected.cwd}</bdi></span></button>{selectedGroup && <button className="session-meta-link" onClick={() => navigate(`group:${selectedGroup.id}`)}><UsersRound size={12} />{selectedGroup.title}</button>}{selectedParent && <button className="session-meta-link" onClick={() => openSession(selectedParent)}><GitFork size={12} />来源：{selectedParent.title}</button>}</nav>
         </div>
         {(selected.backend !== 'dsh' || state.demo) && <div className="private-view-switch" role="group" aria-label="会话显示方式" title="同一个会话，切换视图不重启"><button aria-pressed={privateView !== 'terminal'} onClick={() => switchPrivateView(codexChatAvailable ? 'chat' : 'conversation')}><MessageSquare size={13} />{codexChatAvailable ? '图形对话' : '对话记录'}</button><button aria-pressed={privateView === 'terminal'} disabled={!!busy} onClick={() => switchPrivateView('terminal')}><TerminalSquare size={13} />原生终端</button></div>}
         <div className="drawer-actions">
@@ -545,6 +540,7 @@ export default function App() {
           {selected.nativeUrl && <a className="icon-button" aria-label="原生窗口" title="在新窗口打开原生界面" target="_blank" rel="noreferrer" href={selected.nativeUrl}><ExternalLink size={15} /></a>}
           <details key={selected.id} className="session-info"><summary title="更多"><Ellipsis size={16} /><span className="sr-only">会话信息</span></summary><div className="session-info-content">
             <button className="text-button" disabled={!selectedBackend?.capabilities.fork || !selected.nativeSessionId || selected.forkPending} title={!selected.nativeSessionId || selected.forkPending ? '请先启动来源会话并完成初始化，再进行 Fork' : '分叉当前上下文'} onClick={() => setModal({ type: 'fork', session: selected, groupId: selected.groupId ?? undefined })}><GitFork size={13} />Fork 会话</button>
+            <button className="text-button" onClick={() => setModal({ type: 'shareLink', session: selected })}><Link2 size={13} />分享给同事</button>
             <button className="text-button" onClick={() => void copyText(`${location.origin}${location.pathname}${location.search}${workspaceHash({ view, selectedId: selected.id })}`, '会话链接')}><Copy size={13} />复制会话链接</button>
             <div><span>{selected.forkPending ? '来源会话标识' : '原生会话标识'}</span>{selected.nativeSessionId ? <><code>{selected.nativeSessionId}</code><button className="icon-button" aria-label="复制原生会话标识" title="复制原生会话标识" onClick={() => void copyText(selected.nativeSessionId!, '原生会话标识')}><Copy size={13} /></button></> : <small>首次启动后生成</small>}</div>{selected.forkPending && <p>原生 Fork 尚未完成；启动后会获得独立的会话标识。</p>}
             <div><span>创建时间</span><time dateTime={selected.createdAt}>{new Date(selected.createdAt).toLocaleString('zh-CN')}</time></div>
@@ -567,13 +563,14 @@ export default function App() {
 
     {modal?.type === 'help' && <HelpDialog close={closeModal} />}
     {modal?.type === 'replaceDraft' && <ModalShell title="替换当前群组草稿？" subtitle={`将 ${modal.sourceName} 的消息转交为任务，当前草稿需要先处理。`} close={closeModal}><div className="modal-fields"><p className="draft-replace-preview">{modal.draft || '当前草稿已选择接收成员。'}</p><p className="form-note">保留草稿会取消这次转交。替换后，可编辑任务内容并选择接收成员；创建任务仍需你提交。</p></div><div className="modal-footer"><button className="button secondary" onClick={closeModal}>保留当前草稿</button><button className="button primary" onClick={() => { modal.proceed(); closeModal(); }}>替换为转交任务</button></div></ModalShell>}
-    {modal && modal.type !== 'help' && modal.type !== 'replaceDraft' && state && <AppModal modal={modal} state={state} close={closeModal} done={async (session?: Session, group?: Group) => { await refresh().catch(() => {}); closeModal(); if (group) navigate(`group:${group.id}`); if (session) { if (session.groupId) navigate(`group:${session.groupId}`); openSession(session); } }} notify={notify} />}
+    {modal?.type === 'shareLink' && <ShareDialog session={modal.session} close={closeModal} notify={notify} />}
+    {modal && modal.type !== 'help' && modal.type !== 'replaceDraft' && modal.type !== 'shareLink' && state && <AppModal modal={modal} state={state} close={closeModal} done={async (session?: Session, group?: Group) => { await refresh().catch(() => {}); closeModal(); if (group) navigate(`group:${group.id}`); if (session) { if (session.groupId) navigate(`group:${session.groupId}`); openSession(session); } }} notify={notify} />}
     {toast && <div className="toast" role="status"><CheckCheck size={16} />{toast}<button aria-label="关闭提示" onClick={() => setToast('')}><X size={14} /></button></div>}
   </div>;
 }
 
-function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArchive, onCopyDirectory }: {
-  session: Session; canFork: boolean; onOpen: (invoker?: HTMLElement) => void; onRename: () => void; onFork: () => void; onPin: () => void; onArchive: () => void; onCopyDirectory: () => void;
+function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArchive, onCopyDirectory, onShare }: {
+  session: Session; canFork: boolean; onShare: () => void; onOpen: (invoker?: HTMLElement) => void; onRename: () => void; onFork: () => void; onPin: () => void; onArchive: () => void; onCopyDirectory: () => void;
 }) {
   const [menu, setMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -608,7 +605,7 @@ function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArch
     </div>
     {session.lastUserInput && <div className="card-prompt"><span>最近输入</span><p title={session.lastUserInput}>{session.lastUserInput}</p></div>}
     <div className="card-activity"><span className="activity-chip" title={preview}>{preview}</span><time dateTime={session.lastActivity} title={new Date(session.lastActivity).toLocaleString('zh-CN')}>{relativeTime(session.lastActivity)}</time>
-      <span className="card-menu-anchor" ref={menuRef}><button ref={menuButtonRef} className="icon-button" aria-label={`${session.title} 的更多操作`} aria-expanded={menu} onClick={() => setMenu(!menu)}><Ellipsis size={15} /></button>{menu && <div className="dropdown-menu"><button onClick={() => { menuButtonRef.current?.focus(); onRename(); setMenu(false); }}><Pencil size={14} />改名</button><button onClick={() => { menuButtonRef.current?.focus(); onPin(); setMenu(false); }}><Pin size={14} />{session.pinned ? '取消置顶' : '置顶联系人'}</button><button disabled={!canFork} title={canFork ? undefined : !session.nativeSessionId || session.forkPending ? '请先启动原生会话并完成初始化' : '该后端暂不可 Fork'} onClick={() => { menuButtonRef.current?.focus(); onFork(); setMenu(false); }}><GitFork size={14} />Fork 会话</button><span /><button onClick={() => { onArchive(); setMenu(false); }}><Archive size={14} />{session.archived ? '恢复到列表' : '归档联系人'}</button></div>}</span></div>
+      <span className="card-menu-anchor" ref={menuRef}><button ref={menuButtonRef} className="icon-button" aria-label={`${session.title} 的更多操作`} aria-expanded={menu} onClick={() => setMenu(!menu)}><Ellipsis size={15} /></button>{menu && <div className="dropdown-menu"><button onClick={() => { menuButtonRef.current?.focus(); onRename(); setMenu(false); }}><Pencil size={14} />改名</button><button onClick={() => { menuButtonRef.current?.focus(); onPin(); setMenu(false); }}><Pin size={14} />{session.pinned ? '取消置顶' : '置顶联系人'}</button><button disabled={!canFork} title={canFork ? undefined : !session.nativeSessionId || session.forkPending ? '请先启动原生会话并完成初始化' : '该后端暂不可 Fork'} onClick={() => { menuButtonRef.current?.focus(); onFork(); setMenu(false); }}><GitFork size={14} />Fork 会话</button><button onClick={() => { menuButtonRef.current?.focus(); onShare(); setMenu(false); }}><Link2 size={14} />分享会话</button><span /><button onClick={() => { onArchive(); setMenu(false); }}><Archive size={14} />{session.archived ? '恢复到列表' : '归档联系人'}</button></div>}</span></div>
   </article>;
 }
 
@@ -766,7 +763,7 @@ function GroupBoard({ detail, members, demo, busy, post, deliver, cancel, open, 
   </div></section>;
 }
 
-function AppModal({ modal, state, close, done, notify }: { modal: Exclude<NonNullable<Modal>, { type: 'help' | 'replaceDraft' }>; state: AppState; close: () => void; done: (session?: Session, group?: Group) => Promise<void>; notify: (message: string) => void }) {
+function AppModal({ modal, state, close, done, notify }: { modal: Exclude<NonNullable<Modal>, { type: 'help' | 'replaceDraft' | 'shareLink' }>; state: AppState; close: () => void; done: (session?: Session, group?: Group) => Promise<void>; notify: (message: string) => void }) {
   const [title, setTitle] = useState(modal.type === 'rename' ? modal.session.title : modal.type === 'fork' ? `${modal.session.title} · Fork` : modal.type === 'group' ? modal.group?.title ?? '' : '');
   const [backend, setBackend] = useState<Backend>((modal.type === 'create' ? modal.backend : undefined) ?? state.backends.find((item) => item.installed)?.id ?? 'claude');
   const recentSessions = useMemo(() => [...state.sessions].sort((first, second) => second.lastActivity.localeCompare(first.lastActivity)), [state.sessions]);

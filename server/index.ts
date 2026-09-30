@@ -10,7 +10,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Store } from './store.ts';
 import { Terminals, type LaunchCommand } from './terminal.ts';
 import { ShellTerminals } from './shell-terminals.ts';
-import { allowedRequest, validToken } from './security.ts';
+import { allowedRemoteRequest, allowedRequest, readCookie, validToken } from './security.ts';
+import { AuthStore, type Principal } from './auth.ts';
+import { authorize } from './access.ts';
+import { caddyConfig, DEFAULT_REMOTE, normalizeRemote, Tunnel } from './remote.ts';
+import type { AuthStatus, RemoteSettings, RemoteStatus, ShareMode } from '../shared/auth.ts';
 import { demoBackends, seedDemo, demoCommand } from './demo.ts';
 import { getBackendInfo, buildLaunch, discoverSessions, resolveNativeSessionId, validateNativeId, findExecutable } from './adapters.ts';
 import { DshBridge } from './dsh.ts';
@@ -43,6 +47,17 @@ const terminalImageDir = join(dataDir, 'terminal-images');
 mkdirSync(terminalImageDir, { recursive: true, mode: 0o700 });
 const token = randomBytes(32).toString('hex');
 const instanceId = randomUUID();
+const auth = new AuthStore(store.db, token);
+const DEVICE_COOKIE = 'sessiondeck_device';
+const LOCAL_OWNER: Principal = { kind: 'owner', local: true };
+// The remote listener binds loopback only; the SSH tunnel carries it to the
+// server's loopback and the reverse proxy there terminates TLS.
+const envRemotePort = process.env.SESSIONDECK_REMOTE_PORT ? Number(process.env.SESSIONDECK_REMOTE_PORT) : null;
+if (envRemotePort !== null && (!Number.isInteger(envRemotePort) || envRemotePort < 1024 || envRemotePort > 65535 || envRemotePort === port)) throw new Error('SESSIONDECK_REMOTE_PORT 必须是与 Web 端口不同的 1024–65535 端口');
+function remoteSettings(): RemoteSettings {
+  return { ...DEFAULT_REMOTE, localPort: envRemotePort ?? port + 1, ...auth.setting<Partial<RemoteSettings>>('remote'), ...(envRemotePort ? { localPort: envRemotePort } : {}) };
+}
+const tunnel = new Tunnel();
 const terminals = new Terminals();
 const shells = new ShellTerminals();
 const nativeStatus = new NativeStatusWatcher();
@@ -55,8 +70,16 @@ const codexBridge = new CodexBridge({ dataDir });
 const codexRuns = new Map<string, { nativeId: string; launchId: string }>();
 const app = express();
 const server = createServer(app);
+const remoteServer = createServer(app);
+const remoteSockets = new WeakSet<object>();
+remoteServer.on('connection', socket => remoteSockets.add(socket));
+const isRemote = (req: { socket: object }) => remoteSockets.has(req.socket);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-const sse = new Set<express.Response>();
+// Remote viewers keep their device token in memory so a revoked or expired
+// device is disconnected instead of continuing to receive live output.
+type Viewer = { principal: Principal; device?: string };
+const sse = new Map<express.Response, Viewer>();
+const viewers = new WeakMap<WebSocket, Viewer>();
 const starting = new Set<string>();
 const stopping = new Set<string>();
 const expectedNativeIds = new Map<string, string>();
@@ -77,11 +100,29 @@ function broadcast() {
   const patch = publisher.takePatch();
   if (!patch) return;
   const chunk = `event: patch\ndata: ${JSON.stringify(patch)}\n\n`;
-  for (const client of sse) {
+  for (const [client, viewer] of sse) {
     // A sleeping tab must not retain an unbounded queue of obsolete full states.
     if (client.destroyed || client.writableLength > 2_097_152) { sse.delete(client); client.destroy(); }
-    else client.write(chunk);
+    // A share sees one session. Its tiny filtered snapshot replaces patches
+    // that could otherwise mention other contacts, groups or activities.
+    else client.write(viewer.principal.kind === 'share' ? `event: state\ndata: ${JSON.stringify(viewState(viewer.principal))}\n\n` : chunk);
   }
+}
+function viewState(principal: Principal): AppState {
+  const full = state();
+  if (principal.kind !== 'share') return full;
+  return {
+    ...full, defaultCwd: '', groups: [],
+    sessions: full.sessions.filter(item => item.id === principal.sessionId && !item.archived),
+    activities: full.activities.filter(activity => activity.sessionId === principal.sessionId),
+  };
+}
+function principalOf(res: express.Response): Principal { return res.locals.principal as Principal; }
+/** Drops live connections whose device was revoked, expired or re-keyed. */
+function revalidateViewers() {
+  for (const [client, viewer] of sse) if (viewer.device && !auth.principal(viewer.device)) { sse.delete(client); client.end(); }
+  for (const socket of wss.clients) { const viewer = viewers.get(socket); if (viewer?.device && !auth.principal(viewer.device)) socket.close(4401, '访问已撤销'); }
+  chatApi.revalidate(device => !!auth.principal(device));
 }
 function terminalEvent(id: string, event: unknown, channel: 'sessionId' | 'shellId' = 'sessionId') {
   const message = JSON.stringify(event);
@@ -167,13 +208,39 @@ function observeNative(item: Session) {
 
 app.disable('x-powered-by');
 app.use((req, res, next) => {
-  if (!allowedRequest(req, port, wildcardHost)) return res.status(403).json({ error: '请求来源不被允许' });
+  const remote = isRemote(req);
+  if (remote ? !allowedRemoteRequest(req, remoteSettings().publicUrl, remoteSettings().localPort) : !allowedRequest(req, port, wildcardHost)) return res.status(403).json({ error: '请求来源不被允许' });
+  const device = remote ? readCookie(req.headers.cookie, DEVICE_COOKIE) : undefined;
+  res.locals.remote = remote;
+  res.locals.device = device;
+  res.locals.principal = remote ? auth.principal(device) : LOCAL_OWNER;
+  if (req.path.startsWith('/api/')) {
+    const decision = authorize(res.locals.principal, remote, req.method, req.path);
+    if (!decision.allowed) return res.status(decision.status).json({ error: decision.error, code: decision.status === 401 ? 'AUTH_REQUIRED' : undefined });
+    const principal = res.locals.principal as Principal | null;
+    if (principal?.kind === 'share' && req.method === 'POST') shareActivity(principal, req.path);
+  }
+  if (remote && req.headers['x-forwarded-proto'] === 'https') res.setHeader('Strict-Transport-Security', 'max-age=31536000');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
   next();
 });
+
+// Every action taken through a share is attributed in the session's activity.
+const shareActions: [RegExp, string][] = [
+  [/\/start$/, '启动了会话'], [/\/stop$/, '停止了会话'], [/\/chat\/messages$/, '发送了消息'],
+  [/\/chat\/requests\//, '处理了审批'], [/\/chat\/interrupt$/, '停止了生成'], [/\/terminal\/image$/, '粘贴了图片'],
+];
+function shareActivity(principal: Extract<Principal, { kind: 'share' }>, path: string) {
+  const action = shareActions.find(([pattern]) => pattern.test(path))?.[1];
+  if (action) { store.activity(principal.sessionId, 'share', `${principal.name}（分享）${action}`); scheduleBroadcast(); }
+}
+function csrfValid(req: express.Request, res: express.Response) {
+  const principal = res.locals.principal as Principal | null;
+  return !!principal && validToken(req.headers['x-sessiondeck-token'], auth.csrf(principal));
+}
 
 type PendingTerminalImage = { id: string; generation: string; type: TerminalImageType };
 const pendingTerminalImages = new WeakMap<express.Request, PendingTerminalImage>();
@@ -189,7 +256,7 @@ function hasImageSignature(body: Buffer, type: TerminalImageType): boolean {
   return body.length >= 12 && body.subarray(0, 4).toString('ascii') === 'RIFF' && body.subarray(8, 12).toString('ascii') === 'WEBP';
 }
 function captureTerminalImage(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (!validToken(req.headers['x-sessiondeck-token'], token)) return res.status(403).json({ error: '操作凭证已过期，请刷新页面' });
+  if (!csrfValid(req, res)) return res.status(403).json({ error: '操作凭证已过期，请刷新页面' });
   const type = imageType(req.headers['content-type']);
   if (!type) return res.status(415).json({ error: '仅支持 PNG、JPEG、GIF 或 WebP 图片' });
   const length = req.headers['content-length'];
@@ -240,16 +307,110 @@ app.post('/api/sessions/:id/terminal/image', captureTerminalImage,
     }
   });
 app.use(express.json({ limit: '128kb' }));
+// Login and share redemption run before a device exists; the remote listener
+// already requires a matching Origin for them, and SameSite blocks the cookie.
+const preAuth = new Set(['/api/auth/login', '/api/auth/redeem', '/api/auth/logout']);
 app.use('/api', (req, res, next) => {
-  if (!['GET', 'HEAD'].includes(req.method) && !validToken(req.headers['x-sessiondeck-token'], token))
+  if (!['GET', 'HEAD'].includes(req.method) && !preAuth.has(req.originalUrl.split('?')[0]) && !csrfValid(req, res))
     return res.status(403).json({ error: '操作凭证已过期，请刷新页面' });
   if (!['GET', 'HEAD'].includes(req.method) && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)))
     return res.status(400).json({ error: '请求正文必须是 JSON 对象' });
   next();
 });
 
-app.get('/api/config', (_req, res) => res.json({ csrfToken: token }));
-app.get('/api/state', (_req, res) => res.json(state()));
+app.get('/api/config', (_req, res) => res.json({ csrfToken: auth.csrf(principalOf(res)) }));
+app.get('/api/state', (_req, res) => res.json(viewState(principalOf(res))));
+
+function authStatus(res: express.Response): AuthStatus {
+  const principal = res.locals.principal as Principal | null;
+  const remote = res.locals.remote as boolean;
+  if (!principal) return { kind: 'anonymous', remote: true, passwordSet: auth.hasPassword() };
+  if (principal.kind === 'share') return { kind: 'share', remote, sessionId: principal.sessionId, mode: principal.mode, name: principal.name };
+  return { kind: 'owner', remote, passwordSet: auth.hasPassword() };
+}
+function setDevice(req: express.Request, res: express.Response, token: string, expiresAt: string | null) {
+  const secure = req.headers['x-forwarded-proto'] === 'https';
+  const maxAge = expiresAt ? Math.max(0, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000)) : 10 * 365 * 86400;
+  res.setHeader('Set-Cookie', `${DEVICE_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`);
+}
+const clientAddress = (req: express.Request) => String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+const userAgent = (req: express.Request) => String(req.headers['user-agent'] ?? '').slice(0, 200);
+app.get('/api/auth/status', (_req, res) => res.json(authStatus(res)));
+app.post('/api/auth/login', async (req, res) => {
+  if (!res.locals.remote) return res.json(authStatus(res));
+  const { token: device, device: info } = await auth.login(req.body.password, clientAddress(req), userAgent(req));
+  setDevice(req, res, device, info.expiresAt);
+  res.locals.principal = auth.principal(device);
+  res.json(authStatus(res));
+});
+app.post('/api/auth/redeem', (req, res) => {
+  const { token: device, device: info } = auth.redeemShare(req.body.token, req.body.name, userAgent(req));
+  // Redeeming on the loopback listener would be pointless: it is always owner.
+  if (!res.locals.remote) fail('分享链接需要通过远程地址打开', 409);
+  setDevice(req, res, device, info.expiresAt);
+  res.locals.principal = auth.principal(device);
+  res.json(authStatus(res));
+});
+app.post('/api/auth/logout', (_req, res) => {
+  const principal = res.locals.principal as Principal | null;
+  if (principal) auth.logout(principal);
+  res.setHeader('Set-Cookie', `${DEVICE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  revalidateViewers();
+  res.json({ ok: true });
+});
+app.post('/api/auth/password', async (req, res) => {
+  await auth.setPassword(req.body.password);
+  revalidateViewers();
+  res.json(authStatus(res));
+});
+app.get('/api/auth/devices', (_req, res) => res.json(auth.ownerDevices()));
+app.delete('/api/auth/devices/:id', (req, res) => { auth.revokeDevice(String(req.params.id)); revalidateViewers(); res.json({ ok: true }); });
+
+function remoteStatus(): RemoteStatus {
+  const settings = remoteSettings();
+  return { settings, tunnel: tunnel.status(), listening: remoteServer.listening, caddy: caddyConfig(settings) };
+}
+async function applyRemote() {
+  const settings = remoteSettings();
+  const wanted = settings.enabled || envRemotePort !== null;
+  const address = remoteServer.address();
+  const boundPort = address && typeof address === 'object' ? address.port : null;
+  if (remoteServer.listening && (!wanted || boundPort !== settings.localPort)) {
+    remoteServer.closeAllConnections();
+    await new Promise<void>(accept => remoteServer.close(() => accept()));
+  }
+  if (wanted && !remoteServer.listening && !closing) {
+    await new Promise<void>((accept, reject) => {
+      const failed = (error: NodeJS.ErrnoException) => reject(Object.assign(new Error(error.code === 'EADDRINUSE' ? `远程监听端口 ${settings.localPort} 已被占用` : error.message), { status: 409 }));
+      remoteServer.once('error', failed);
+      remoteServer.listen(settings.localPort, '127.0.0.1', () => { remoteServer.off('error', failed); accept(); });
+    });
+  }
+  await tunnel.configure(settings.enabled && remoteServer.listening ? settings : null);
+}
+app.get('/api/remote', (_req, res) => res.json(remoteStatus()));
+app.post('/api/remote', async (req, res) => {
+  const next = normalizeRemote(req.body, remoteSettings());
+  if (next.localPort === port) fail('远程监听端口不能与本机 Web 端口相同');
+  const { localPort, ...saved } = next;
+  auth.setSetting('remote', envRemotePort ? saved : { ...saved, localPort });
+  await applyRemote();
+  res.json(remoteStatus());
+});
+
+const shareUrl = (secret: string) => `${remoteSettings().publicUrl || `http://127.0.0.1:${remoteSettings().localPort}`}/#/share/${secret}`;
+app.get('/api/sessions/:id/shares', (req, res) => { session(String(req.params.id)); res.json(auth.shares(String(req.params.id))); });
+app.post('/api/sessions/:id/shares', (req, res) => {
+  const item = session(String(req.params.id));
+  const mode = req.body.mode as ShareMode;
+  if (mode !== 'read' && mode !== 'write') fail('分享权限无效');
+  const ttl = req.body.ttlDays === null ? null : Number(req.body.ttlDays);
+  if (ttl !== null && (!Number.isInteger(ttl) || ttl < 1 || ttl > 365)) fail('有效期无效');
+  const { token: secret, share } = auth.createShare(item.id, mode, ttl, text(req.body.label ?? '', '备注', 80, false));
+  store.activity(item.id, 'share', `创建了${mode === 'write' ? '可协作' : '只读'}分享链接`); broadcast();
+  res.status(201).json({ share, url: shareUrl(secret), remoteReady: !!remoteSettings().publicUrl && remoteSettings().enabled });
+});
+app.delete('/api/shares/:id', (req, res) => { auth.revokeShare(String(req.params.id)); revalidateViewers(); broadcast(); res.json({ ok: true }); });
 app.get('/api/shells', (_req, res) => res.json(shells.list()));
 app.post('/api/shells', (req, res) => {
   if (closing) fail('终端服务正在关闭', 503);
@@ -304,8 +465,9 @@ app.get('/api/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
-  res.write(`event: state\ndata: ${JSON.stringify(state())}\n\n`);
-  sse.add(res);
+  const principal = principalOf(res);
+  res.write(`event: state\ndata: ${JSON.stringify(viewState(principal))}\n\n`);
+  sse.set(res, { principal, device: res.locals.device });
   const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20_000);
   req.on('close', () => { sse.delete(res); clearInterval(heartbeat); });
 });
@@ -653,16 +815,34 @@ terminals.on('exit', (id: string, exitCode: number) => {
 });
 shells.on('data', (id: string, data: string) => terminalEvent(id, { type: 'data', data }, 'shellId'));
 shells.on('exit', (id: string, exitCode: number) => terminalEvent(id, { type: 'exit', exitCode }, 'shellId'));
-server.on('upgrade', (req, socket, head) => {
+function upgrade(req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) {
   const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
   const shellMatch = /^\/api\/shells\/([^/]+)\/terminal$/.exec(url.pathname);
   if (!url.pathname.startsWith('/api/terminal/') && !shellMatch) return; // Vite owns its own HMR upgrade.
-  if (!allowedRequest(req, port, wildcardHost) || !validToken(url.searchParams.get('token'), token)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  const remote = isRemote(req);
+  const device = remote ? readCookie(req.headers.cookie, DEVICE_COOKIE) : undefined;
+  const principal = remote ? auth.principal(device) : LOCAL_OWNER;
+  const allowed = remote ? allowedRemoteRequest(req, remoteSettings().publicUrl, remoteSettings().localPort) : allowedRequest(req, port, wildcardHost);
+  // Shells are owner-only; a session terminal needs at least read access to it.
+  const scope = shellMatch ? 'owner' : 'session';
+  const sessionTarget = shellMatch ? null : decodeURIComponent(url.pathname.slice('/api/terminal/'.length));
+  const permitted = !!principal && (principal.kind === 'owner' || (scope === 'session' && principal.sessionId === sessionTarget));
+  if (!allowed || !principal || !permitted || !validToken(url.searchParams.get('token'), auth.csrf(principal))) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return; }
+  const viewer: Viewer = { principal, device };
+  // Read-only shares watch the same PTY stream; their keystrokes are discarded.
+  const canInput = principal.kind === 'owner' || principal.mode === 'write';
+  let announced = false;
+  const attribute = () => {
+    if (announced || principal.kind !== 'share') return;
+    announced = true;
+    store.activity(principal.sessionId, 'share', `${principal.name}（分享）在终端输入`); scheduleBroadcast();
+  };
   if (shellMatch) {
     const id = shellMatch[1]!;
     const shell = shells.get(id);
     if (!shell || closing) { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, ws => {
+      viewers.set(ws, viewer);
       ws.on('error', () => ws.close());
       (ws as WebSocket & { shellId: string }).shellId = id;
       ws.send(JSON.stringify({ type: 'data', data: shells.buffer(id) }));
@@ -677,27 +857,35 @@ server.on('upgrade', (req, socket, head) => {
     });
     return;
   }
-  const id = url.pathname.slice('/api/terminal/'.length);
+  const id = sessionTarget!;
   if (!store.session(id)) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => {
+    viewers.set(ws, viewer);
     ws.on('error', () => ws.close());
     (ws as WebSocket & { sessionId: string }).sessionId = id;
     ws.send(JSON.stringify({ type: 'data', data: terminals.buffer(id) }));
     // The browser uses this per-PTY UUID to prevent an image upload from
     // landing in a replacement process after a stop/restart race.
-    ws.send(JSON.stringify({ type: 'ready', terminalId: terminals.generation(id) }));
+    ws.send(JSON.stringify({ type: 'ready', terminalId: terminals.generation(id), readOnly: !canInput }));
     ws.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());
         if (message.type === 'input' && typeof message.data === 'string' && message.data.length <= 32768) {
+          if (!canInput) return;
           if (stopping.has(id)) throw new Error('会话正在停止，暂时无法输入');
+          attribute();
           terminals.input(id, message.data);
         }
-        else if (message.type === 'resize') terminals.resize(id, message.cols, message.rows);
+        // A viewer's window size must not reflow the owner's native TUI.
+        else if (message.type === 'resize' && canInput) terminals.resize(id, message.cols, message.rows);
       } catch (error) { ws.send(JSON.stringify({ type: 'error', error: error instanceof Error ? error.message : '终端输入失败' })); }
     });
   });
-});
+}
+server.on('upgrade', upgrade);
+remoteServer.on('upgrade', upgrade);
+const viewerCheck = setInterval(revalidateViewers, 30_000);
+viewerCheck.unref();
 
 let nativePolling = false;
 let nativeAgain = false;
@@ -796,25 +984,34 @@ server.once('error', error => {
   console.error((error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? `端口 ${port} 已被占用，请设置 SESSIONDECK_PORT 为其他端口。` : error.message);
   shutdown(1);
 });
-server.listen(port, host, () => console.log(`SessionDeck${demo ? ' [演示模式，不调用真实模型]' : ''} → http://${host.includes(':') ? `[${host}]` : host}:${port}\n本地数据：${dataDir}`));
+server.listen(port, host, () => {
+  console.log(`SessionDeck${demo ? ' [演示模式，不调用真实模型]' : ''} → http://${host.includes(':') ? `[${host}]` : host}:${port}\n本地数据：${dataDir}`);
+  void applyRemote().then(() => {
+    if (remoteServer.listening) console.log(`远程访问监听 → http://127.0.0.1:${remoteSettings().localPort}（需要登录）`);
+  }).catch(error => console.error(`远程访问未启动：${error instanceof Error ? error.message : String(error)}`));
+});
 function shutdown(exitCode = 0) {
   if (closing) return; closing = true;
   clearInterval(nativePoll);
   clearInterval(previewPoll);
+  clearInterval(viewerCheck);
   chatApi.close();
   if (nativeScheduled) clearTimeout(nativeScheduled);
   if (scheduled) clearTimeout(scheduled);
   for (const timer of identityTimers) clearTimeout(timer);
   terminals.removeAllListeners(); shells.removeAllListeners(); nativeStatus.close();
-  for (const client of sse) client.end();
+  for (const client of sse.keys()) client.end();
   for (const ws of wss.clients) ws.terminate();
-  const httpClosed = new Promise<void>(accept => server.close(() => accept()));
-  server.closeAllConnections();
+  const httpClosed = Promise.all([
+    new Promise<void>(accept => server.close(() => accept())),
+    remoteServer.listening ? new Promise<void>(accept => remoteServer.close(() => accept())) : Promise.resolve(),
+  ]);
+  server.closeAllConnections(); remoteServer.closeAllConnections();
   // Keep the storage lease until native children and their callbacks are gone.
   // Exiting directly in server.close used to orphan a slow native process and
   // let a replacement instance race it against the same native history.
   void (async () => {
-    const results = await Promise.allSettled([httpClosed, terminals.close(), shells.close(), dsh.close(), codexBridge.close()]);
+    const results = await Promise.allSettled([httpClosed, tunnel.close(), terminals.close(), shells.close(), dsh.close(), codexBridge.close()]);
     for (const result of results) if (result.status === 'rejected') { console.error('关闭原生资源失败：', result.reason instanceof Error ? result.reason.message : String(result.reason)); exitCode = 1; }
     try { publisher.close(); store.close(); }
     finally { await instanceLock.release(); }

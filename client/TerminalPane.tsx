@@ -6,9 +6,11 @@ import '@xterm/xterm/css/xterm.css';
 import { getToken, uploadTerminalImage } from './api';
 import { MAX_TERMINAL_IMAGE_BYTES, TERMINAL_IMAGE_TYPES } from '../shared/terminal-images';
 
-export default function TerminalPane({ sessionId, running, status, allowImages, onSelection, channel = 'session', onExit, focusRequest }: {
+export default function TerminalPane({ sessionId, running, status, allowImages: imagesRequested, onSelection, channel = 'session', onExit, focusRequest, readOnly: readOnlyRequested = false }: {
   sessionId: string; running: boolean; status?: string; allowImages?: boolean; onSelection: (text: string) => void;
   channel?: 'session' | 'shell'; onExit?: (exitCode: number) => void; focusRequest?: number;
+  /** Watch only. The server also discards input from read-only shares. */
+  readOnly?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -22,6 +24,9 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
   const [terminalId, setTerminalId] = useState<string | null>(null);
   const [imageStatus, setImageStatus] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [serverReadOnly, setServerReadOnly] = useState(false);
+  const readOnly = readOnlyRequested || serverReadOnly;
+  const allowImages = imagesRequested && !readOnly;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const terminalIdRef = useRef<string | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -38,7 +43,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
     let reconnect: ReturnType<typeof setTimeout> | undefined;
     let everConnected = false;
     let attempts = 0;
-    let acceptsInput = running;
+    let acceptsInput = running && !readOnlyRequested;
     setConnected(false); setError(''); setCopied(false);
     terminalIdRef.current = null; setTerminalId(null); setImageStatus('');
     uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; setUploadingImage(false);
@@ -98,7 +103,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
           if (everConnected) terminal.reset();
           everConnected = true;
           attempts = 0;
-          terminal.options.disableStdin = !running;
+          terminal.options.disableStdin = !acceptsInput;
           setConnected(true); setError(''); resize();
         };
         socket.onmessage = (event) => {
@@ -109,6 +114,8 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
             if (message.type === 'ready') {
               terminalIdRef.current = typeof message.terminalId === 'string' ? message.terminalId : null;
               setTerminalId(terminalIdRef.current);
+              if (message.readOnly === true) { acceptsInput = false; terminal.options.disableStdin = true; }
+              setServerReadOnly(message.readOnly === true);
               if (channel === 'shell' && typeof message.running === 'boolean') {
                 acceptsInput = message.running;
                 terminal.options.disableStdin = !acceptsInput;
@@ -143,7 +150,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
       disposed = true; clearTimeout(reconnect); clearTimeout(copiedTimer.current); uploadAbortRef.current?.abort(); uploadAbortRef.current = null; uploadingRef.current = false; socket?.close(); input.dispose(); selection.dispose();
       resizeObserver.disconnect(); terminal.dispose(); terminalRef.current = null; fitRef.current = null;
     };
-  }, [sessionId, running, channel]);
+  }, [sessionId, running, channel, readOnlyRequested]);
   useEffect(() => {
     // Focus follows an explicit activation, never a socket reconnect. Only the
     // requested split pane receives focus when several terminals mount together.
@@ -207,7 +214,7 @@ export default function TerminalPane({ sessionId, running, status, allowImages, 
 
   const toggleLabel = fullscreen ? '退出全屏' : '全屏';
   return <div className={`terminal-pane ${fullscreen ? 'fullscreen' : ''}`} onPasteCapture={onPasteCapture}>
-    <div className="terminal-toolbar"><span title={connected ? '浏览器已连接终端通道；任务是否执行请查看会话状态' : '正在连接终端通道'} className={`terminal-connection ${connected ? 'connected' : ''}`}><i />{connected ? '已连接' : '连接中'}</span><div>
+    <div className="terminal-toolbar">{readOnly && <span className="terminal-readonly">只读查看</span>}<span title={connected ? '浏览器已连接终端通道；任务是否执行请查看会话状态' : '正在连接终端通道'} className={`terminal-connection ${connected ? 'connected' : ''}`}><i />{connected ? '已连接' : '连接中'}</span><div>
       {allowImages && <><input ref={fileInputRef} className="terminal-image-input" type="file" accept={TERMINAL_IMAGE_TYPES.join(',')} onChange={onImageSelected} /><button title="选择图片并填入原生输入" aria-label="选择图片并填入原生输入" disabled={!connected || !terminalId || !running || uploadingImage} onClick={() => fileInputRef.current?.click()}>{uploadingImage ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}</button></>}
       <button title="复制选中的终端内容" aria-label="复制选中的终端内容" onClick={async () => {
         const selected = terminalRef.current?.getSelection();

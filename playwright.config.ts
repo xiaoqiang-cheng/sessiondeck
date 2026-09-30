@@ -33,6 +33,8 @@ export default defineConfig({
       SESSIONDECK_PORT: String(testPort),
       SESSIONDECK_DATA_DIR: dataDir,
       SESSIONDECK_CLIENT_DIR: clientDir,
+      // The authenticated remote listener, reached directly instead of through a tunnel.
+      SESSIONDECK_REMOTE_PORT: String(testPort + 1),
     },
     reuseExistingServer: false,
   },
