@@ -182,6 +182,8 @@ function groupId(value: unknown): string | null {
   return id;
 }
 function info(id: Backend) { return backends.find(b => b.id === id)!; }
+/** DeepSeek Harness runs in a PTY like Claude/Codex when dsh-tui is installed; otherwise through its native Web UI. */
+const dshWeb = (item: Pick<Session, 'backend'>) => item.backend === 'dsh' && !demo && !info('dsh').capabilities.terminal;
 function status(id: string, patch: Partial<Session>, activity?: string) {
   if (closing) return;
   const old = session(id);
@@ -553,7 +555,7 @@ app.post('/api/sessions/:id/fork', async (req, res) => {
   const cwd = req.body.cwd ? directory(req.body.cwd) : parent.cwd;
   const targetGroupId = groupId(req.body.groupId);
   let child: Session;
-  if (parent.backend === 'dsh' && !demo) {
+  if (dshWeb(parent)) {
     const native = await dsh.forkSession(parent.nativeSessionId, cwd);
     child = store.addSession({ backend: parent.backend, title, cwd, groupId: targetGroupId, parentId: parent.id, origin: 'forked', ...native, running: true, status: 'idle', statusSource: 'native', statusDetail: '已通过原生能力 Fork，点击进入' });
   } else if (parent.backend === 'codex' && !demo && info('codex').capabilities.nativeControl) {
@@ -603,7 +605,7 @@ app.post('/api/sessions/:id/start', async (req, res) => {
   launchIds.set(item.id, launchId);
   expectedNativeIds.delete(item.id);
   try {
-    if (item.backend === 'dsh' && !demo) {
+    if (dshWeb(item)) {
       const native = item.nativeSessionId ? await dsh.openSession(item.nativeSessionId) : await dsh.createSession(item.cwd, item.title);
       status(item.id, { ...native, running: true, status: 'idle', statusSource: 'native', statusDetail: '原生 Web 会话已就绪', forkPending: false, lastActivity: new Date().toISOString() });
     } else if (item.backend === 'codex' && !demo && info('codex').capabilities.nativeControl) {
@@ -664,7 +666,7 @@ app.post('/api/sessions/:id/stop', async (req, res) => {
   status(item.id, { status: 'unknown', statusSource: 'process', statusDetail: '正在停止，等待原生任务和进程退出' });
   broadcast();
   try {
-    if (item.backend === 'dsh' && !demo) {
+    if (dshWeb(item)) {
       if (item.nativeSessionId) await dsh.stopSession(item.nativeSessionId);
       launchIds.delete(item.id);
       status(item.id, { running: false, nativeUrl: null, status: 'stopped', statusSource: 'native', statusDetail: '已取消当前原生任务，可重新进入会话' });
@@ -730,12 +732,13 @@ app.post('/api/deliveries/:id/send', async (req, res) => {
   if (!target.running || target.archived) fail('请先进入并启动目标会话');
   if (stopping.has(target.id) || terminals.isStopping(target.id)) fail('目标会话正在停止');
   if (target.status === 'waiting_approval') fail('请先在原生会话中处理当前审批，再填入任务');
-  if (target.backend === 'dsh' && !demo && !target.nativeSessionId) fail('原生会话尚未准备好');
+  const targetWeb = dshWeb(target);
+  if (targetWeb && !target.nativeSessionId) fail('原生会话尚未准备好');
   const codexChat = !demo && target.backend === 'codex' && target.interactionMode === 'chat' && codexRuns.has(target.id);
-  if ((target.backend !== 'dsh' || demo) && !codexChat && !terminals.has(target.id)) fail('会话尚未启动或已经退出');
+  if (!targetWeb && !codexChat && !terminals.has(target.id)) fail('会话尚未启动或已经退出');
   deliveryLocks.add(id);
   try {
-    const deliveryStatus = (target.backend === 'dsh' && !demo) || codexChat ? 'sent' : 'staged';
+    const deliveryStatus = targetWeb || codexChat ? 'sent' : 'staged';
     const pending = sendDelivery(store, id, deliveryStatus, async () => {
       if (codexChat) {
         try { await codexBridge.sendPrompt(target.nativeSessionId!, delivery.text); }
@@ -771,15 +774,19 @@ async function resolveIdentity(id: string, startedAt: string, launchId: string, 
   const item = store.session(id);
   if (!item || !item.running || (item.nativeSessionId && !item.forkPending)) return;
   // A timestamp/cwd match is not proof of identity: another CLI may start there.
-  // Codex reports its thread ID through the native completion notification.
+  // Claude is launched with a chosen --session-id and Codex reports its thread
+  // ID through the native notification, so both must match an expected ID.
+  // dsh-tui mints its own ID; the only evidence is a single new session log in
+  // this contact's directory created after launch, which is what the resolver
+  // already requires (one candidate, cwd equal, created at or after start).
   const expected = expectedNativeIds.get(id);
-  if (!expected) return;
+  if (!expected && item.backend !== 'dsh') return;
   try {
     const exclude = publisher.sessions().filter(s => s.id !== id && s.nativeSessionId && !s.forkPending).map(s => s.nativeSessionId!);
     const nativeSessionId = await resolveNativeSessionId(item, startedAt, exclude);
     if (closing || launchIds.get(id) !== launchId || !store.session(id)?.running) return;
     const alreadyLinked = publisher.sessions().some(other => other.id !== id && !other.forkPending && other.nativeSessionId === nativeSessionId && other.backend === item.backend);
-    if (nativeSessionId === expected && !alreadyLinked && (!item.forkPending || nativeSessionId !== item.nativeSessionId)) {
+    if (nativeSessionId && (expected ? nativeSessionId === expected : item.backend === 'dsh') && !alreadyLinked && (!item.forkPending || nativeSessionId !== item.nativeSessionId)) {
       status(id, { nativeSessionId, forkPending: false }); observeNative(session(id)); return;
     }
   } catch { /* Not persisted yet; keep the card honest and retry. */ }
@@ -931,7 +938,7 @@ async function pollNative() {
   if (demo || closing || nativePolling) return;
   nativePolling = true;
   try {
-    const pending = publisher.sessions().filter(s => s.running && !stopping.has(s.id) && s.nativeSessionId && (s.backend === 'dsh' || codexRuns.has(s.id)))
+    const pending = publisher.sessions().filter(s => s.running && !stopping.has(s.id) && s.nativeSessionId && (dshWeb(s) || codexRuns.has(s.id)))
       .map(item => ({ item, launchId: launchIds.get(item.id) }));
     const apply = ({ item, launchId }: typeof pending[number], next: { status: SessionStatus; detail?: string; attentionKey?: string }) => {
       if (closing) return;

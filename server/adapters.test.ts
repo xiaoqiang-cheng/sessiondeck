@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { runInNewContext } from 'node:vm';
 import { buildLaunch, discoverSessions, resolveNativeSessionId, validateNativeId } from './adapters.js';
+import { zstdCompressSync } from 'node:zlib';
 import { DshBridge, dshDeepLinkClient } from './dsh.js';
 import type { Session } from '../shared/types.js';
 
@@ -220,4 +221,48 @@ test('one damaged dsh cache row cannot hide healthy metadata, and oversized cach
   const file = await open(path, 'w');
   try { await file.truncate(17 * 1024 * 1024); } finally { await file.close(); }
   assert.deepEqual(await discoverSessions('dsh', { dshHome: home }), []);
+});
+
+test('DSH accepts both id forms, launches dsh-tui in a PTY, and discovers 0.2 session logs by header', async t => {
+  assert.equal(validateNativeId('dsh', `session-${randomUUID()}`).startsWith('session-'), true);
+  const bare = randomUUID();
+  assert.equal(validateNativeId('dsh', bare), bare);
+  assert.throws(() => validateNativeId('dsh', `${bare}x`), /无效/);
+
+  const dir = await mkdtemp(join(tmpdir(), 'deck-dsh-tui-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tui = join(dir, 'dsh-tui');
+  await writeFile(tui, '#!/bin/sh\n', { mode: 0o700 });
+  const previous = process.env.SESSIONDECK_DSH_TUI_BIN;
+  process.env.SESSIONDECK_DSH_TUI_BIN = tui;
+  t.after(() => { if (previous === undefined) delete process.env.SESSIONDECK_DSH_TUI_BIN; else process.env.SESSIONDECK_DSH_TUI_BIN = previous; });
+  const base = { id: 'card', backend: 'dsh', title: 't', cwd: dir, groupId: null, parentId: null, forkPending: false } as unknown as Session;
+  // A new session: the workspace is the only positional argument; no id is chosen up front.
+  assert.deepEqual(await buildLaunch({ ...base, nativeSessionId: null }), { file: tui, args: [dir] });
+  // Resume keeps the exact id; a pending fork resumes the parent without claiming its id.
+  assert.deepEqual(await buildLaunch({ ...base, nativeSessionId: bare }), { file: tui, args: ['--resume', bare], nativeSessionId: bare });
+  assert.deepEqual(await buildLaunch({ ...base, nativeSessionId: bare, forkPending: true }), { file: tui, args: ['--resume', bare] });
+
+  // dsh 0.2 writes sessions/<slug>/<uuid>/session.v4.jsonl.zstd and no projcache.
+  // The header frame is the authority for cwd and creation time; the slug is lossy.
+  const home = join(dir, 'home'), cwd = join(dir, 'work-a'), other = join(dir, 'work-b');
+  const log = async (id: string, at: number, where: string, version = 4) => {
+    const folder = join(home, 'sessions', `--${where.replace(/\//g, '-')}--`, id);
+    await mkdir(folder, { recursive: true });
+    const header = JSON.stringify({ type: 'session', version, id, createdAt: at, cwd: where }) + '\n';
+    const name = version === 0 ? 'session.jsonl.zstd' : `session.v${version}.jsonl.zstd`;
+    await writeFile(join(folder, name), Buffer.concat([zstdCompressSync(Buffer.from(header)), zstdCompressSync(Buffer.from(JSON.stringify({ type: 'turn/start', seq: 1, time: at + 5 }) + '\n'))]));
+  };
+  const started = Date.now();
+  const fresh = randomUUID(), legacy = `session-${randomUUID()}`, elsewhere = randomUUID();
+  await log(fresh, started + 1000, cwd);
+  await log(legacy, started - 600_000, cwd, 0);
+  await log(elsewhere, started + 1000, other);
+  const rows = await discoverSessions('dsh', { dshHome: home });
+  assert.deepEqual(rows.map(r => r.nativeSessionId).sort(), [elsewhere, fresh, legacy].sort());
+  assert.equal(rows.find(r => r.nativeSessionId === fresh)?.cwd, cwd);
+  // The public listing strips createdAt; resolveNativeSessionId below proves it is read.
+  // Identity: only the one new log in this contact's directory counts.
+  assert.equal(await resolveNativeSessionId({ ...base, nativeSessionId: null, cwd }, new Date(started).toISOString(), [], { dshHome: home }), fresh);
+  assert.equal(await resolveNativeSessionId({ ...base, nativeSessionId: null, cwd: other }, new Date(started).toISOString(), [elsewhere], { dshHome: home }), null);
 });

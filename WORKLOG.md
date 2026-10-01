@@ -274,3 +274,13 @@
 - 手机：左侧栏变为底部标签栏（五个主视图加「更多」），群组只在桌面侧栏出现；工具栏让出刘海，标题与搜索框优先收缩，「+」始终可见。
 - 修复过程中发现两处问题并解决：收起态的隐藏规则误作用于手机标签栏导致只显示一个按钮；手机工具栏「+」被挤出屏幕。
 - 测试：导航按钮名称同步为短标签；演示徽标改为只在 title 中保留全文；窄屏用例改为验证底部标签栏和「+」可见、群组导航仅在桌面显示。`npm run verify`：179 项后端、67 项浏览器通过。截图 `artifacts/rail-desktop.png`、`rail-desktop-expanded.png`、`rail-mobile.png`、`rail-mobile-session.png`。
+
+## 2026-10-01：DeepSeek Harness 原生终端（dsh-tui）与对话记录共存
+
+- 安装 `@deepseek-harness-tui/dsh-tui`（含其前置 pnpm）后调研：`dsh-tui 0.12.0` 以 `dsh 0.2.0-rc.2` 为兼容目标，在本机全局的 `dsh 0.1.1-rc.2` 上启动即因 `@deepseek-ai/dsh-llm` 缺少导出而崩溃。全部验证在隔离前缀 `/tmp/dsh-next`（dsh@latest）与隔离 `DSH_HOME` 中进行，未升级全局 dsh，也未触碰正式 4317 服务。
+- dsh 0.2 的变化：会话 id 由 `session-<uuid>` 变为裸 uuid；日志为 `sessions/<cwd-slug>/<uuid>/session.v4.jsonl.zstd`（多帧 zstd，首帧 `{type:'session', id, createdAt, cwd}`）；TUI 流程不再写 `session_projcache.json`；Web API 改为 cookie 鉴权，且 TUI 创建的会话对 Web API 不可见。因此对话记录改为与 Claude/Codex 一致的本地文件读取，不经 Web 桥。
+- 后端：`validateNativeId` 同时接受两种 dsh id；新增 `findDshTui`，后端能力 `terminal` 对 dsh 取决于是否找到 dsh-tui；`buildLaunch` 对 dsh 生成 `dsh-tui <cwd>` 或 `dsh-tui --resume <id>`（无 fork 参数，待定 fork 以恢复父会话实现）。发现逻辑新增按会话目录读取日志头（cwd/createdAt 以头为准，slug 有损），与 projcache 合并时不以 undefined 覆盖。身份解析对 dsh 放宽为「该目录下唯一一个新建日志」。原生状态观察器支持 dsh：解析 `turn/start`、`turn/end(reason)`、审批/提问请求，压缩日志按整文件解码、只处理未见过的解码字节。`server/index.ts` 以 `dshWeb()` 统一判断：装了 dsh-tui 则 start/stop/fork/投递/轮询全部走 PTY 路径，否则保持原 Web 桥行为。
+- 前端：`App.tsx`/`ShareApp.tsx` 的 dsh 特判收敛为「未安装 dsh-tui」一种情况，视图切换、启停文案、内容区与 Claude 一致。
+- 验证：隔离端到端——后端能力 `terminal:true`；创建并启动后 PTY 中出现 dsh-TUI 界面；未发送任何输入即由日志头解析出原生 id；输入后状态由 `turn/end` 置为 native 来源（隔离环境无 API key 故为 error，符合预期）；对话记录读出用户消息；停止返回 stopped。新增单元测试：两种 id、TUI 启动参数、按头发现与身份解析、dsh 生命周期事件与压缩日志观察。`npm run verify`：181 项后端、67 项浏览器通过。
+- 排查中修复：模板字符串里插入带 `^…$` 锚点的 RegExp 导致 dsh id 全部校验失败（12 项测试）。
+- 待用户决定：正式使用需 `npm install -g @deepseek-ai/dsh@latest`，会升级日常使用的 dsh。

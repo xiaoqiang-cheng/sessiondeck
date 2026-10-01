@@ -114,7 +114,7 @@ function dshMessages(events: unknown[], nativeId: string): ConversationMessage[]
   return output;
 }
 
-function decodeDshFrames(buffer: Buffer, maxOutput: number): { text: string; truncated: boolean } {
+export function decodeDshFrames(buffer: Buffer, maxOutput: number): { text: string; truncated: boolean } {
   // DSH appends independent Zstandard frames. Node's convenience decoder stops
   // after the first frame (normally only the session header), so advance by
   // its consumed input bytes and keep a shared decompression budget.
@@ -345,7 +345,9 @@ export class ConversationReader {
             let id: string | undefined;
             if (backend === 'claude') id = entry.name.match(new RegExp(`^(${UUID})\\.jsonl$`, 'i'))?.[1];
             else if (backend === 'codex') id = entry.name.match(new RegExp(`(?:^|-)(${UUID})\\.jsonl$`, 'i'))?.[1];
-            else if (/^session\.jsonl(?:\.zstd)?$/.test(entry.name) && new RegExp(`^session-${UUID}$`, 'i').test(basename(dirname(path)))) id = basename(dirname(path));
+            // dsh 0.1: sessions/<slug>/session-<uuid>/session.jsonl(.zstd);
+            // dsh 0.2 / dsh-tui: sessions/<slug>/<uuid>/session.v4.jsonl.zstd.
+            else if (/^session(?:\.v\d+)?\.jsonl(?:\.zstd)?$/.test(entry.name) && new RegExp(`^(?:session-)?${UUID}$`, 'i').test(basename(dirname(path)))) id = basename(dirname(path));
             if (id) result.paths.set(id, path);
           }
         }

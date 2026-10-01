@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { zstdDecompressSync } from 'node:zlib';
 import type { Backend, BackendInfo, DiscoveredSession, Session } from '../shared/types.js';
 
 const run = promisify(execFile);
@@ -23,11 +24,23 @@ const READ_CONCURRENCY = 8;
 interface ScanBudget { entries: number; directories: number; deadline: number }
 interface LogFile { path: string; id?: string; modified: number; created: number }
 
+/** dsh 0.1 ids are `session-<uuid>`; dsh 0.2 (and dsh-tui) use the bare uuid. */
+export const DSH_ID = new RegExp(`^(?:session-)?${UUID.source.slice(1, -1)}$`, 'i');
 export function validateNativeId(backend: Backend, id: string): string {
-  if (!(backend === 'dsh' ? id.startsWith('session-') && UUID.test(id.slice(8)) : UUID.test(id))) {
+  if (!(backend === 'dsh' ? DSH_ID.test(id) : UUID.test(id))) {
     throw new Error('无效的原生会话 ID');
   }
   return id;
+}
+
+/** The DeepSeek Harness terminal UI (`dsh-tui`), when installed next to `dsh`. */
+export async function findDshTui(): Promise<string | null> {
+  const configured = process.env.SESSIONDECK_DSH_TUI_BIN;
+  const candidates = configured ? [configured] : (process.env.PATH ?? '').split(delimiter).filter(Boolean).map(p => join(p, 'dsh-tui'));
+  for (const path of candidates) {
+    try { await access(path, constants.X_OK); return resolve(path); } catch { /* next PATH entry */ }
+  }
+  return null;
 }
 
 export async function findExecutable(backend: Backend): Promise<string | null> {
@@ -54,21 +67,33 @@ export async function getBackendInfo(): Promise<BackendInfo[]> {
         nativeControl = serverHelp.includes('--ws-token-file') && serverHelp.includes('--ws-auth');
       } catch { /* An older Codex can still use the native terminal path. */ }
     }
+    // dsh-tui is a separate package. With it present, DeepSeek Harness gets the
+    // same terminal + transcript pairing as Claude and Codex; without it the
+    // embedded native Web UI remains the only interactive path.
+    const tui = id === 'dsh' ? await findDshTui() : null;
     return {
       id, label: LABELS[id], installed: true, version,
-      capabilities: { terminal: id !== 'dsh', resume: id === 'dsh' || /\bresume\b/.test(help), fork: id === 'dsh' || (id === 'claude' ? help.includes('--fork-session') : /\bfork\b/.test(help)), discovery: true, nativeControl, graphicalChat: nativeControl },
-      note: id === 'dsh' ? '复用原生 Web 界面与本地 session API；启动时验证兼容性' : id === 'codex' ? (nativeControl ? '原生 app-server 提供图形对话、流式回复、审批和精确会话；可切换原生终端' : '兼容终端模式：原生 ID 在完成一轮后确认；更新 Codex 可启用图形对话') : '复用原生终端，保留后端自身的登录、权限与审批',
+      capabilities: { terminal: id !== 'dsh' || !!tui, resume: id === 'dsh' || /\bresume\b/.test(help), fork: id === 'dsh' || (id === 'claude' ? help.includes('--fork-session') : /\bfork\b/.test(help)), discovery: true, nativeControl, graphicalChat: nativeControl },
+      note: id === 'dsh' ? (tui ? '原生终端界面（dsh-tui）与对话记录；原生 Web 界面仍可打开' : '复用原生 Web 界面与本地 session API；安装 @deepseek-harness-tui/dsh-tui 可获得原生终端') : id === 'codex' ? (nativeControl ? '原生 app-server 提供图形对话、流式回复、审批和精确会话；可切换原生终端' : '兼容终端模式：原生 ID 在完成一轮后确认；更新 Codex 可启用图形对话') : '复用原生终端，保留后端自身的登录、权限与审批',
     };
   }));
 }
 
 /** Arguments are always passed directly to exec/PTY, never through a shell. */
 export async function buildLaunch(session: Session): Promise<{ file: string; args: string[]; nativeSessionId?: string }> {
-  if (session.backend === 'dsh') throw new Error('DeepSeek Harness 使用原生 Web 界面，请通过 DshBridge 启动');
-  const file = await findExecutable(session.backend);
-  if (!file) throw new Error(`未找到 ${LABELS[session.backend]}，请安装原生命令并加入 PATH`);
   const source = session.nativeSessionId ? validateNativeId(session.backend, session.nativeSessionId) : null;
   if (session.forkPending && !source) throw new Error('原会话尚未获得原生 ID，无法 Fork');
+  if (session.backend === 'dsh') {
+    const tui = await findDshTui();
+    if (!tui) throw new Error('未找到 dsh-tui，请安装 @deepseek-harness-tui/dsh-tui 或使用原生 Web 界面');
+    // dsh-tui resolves the workspace from the session on resume; a new session
+    // takes the directory as its only positional argument. It has no fork flag,
+    // so a pending fork resumes the parent and the TUI branches from there.
+    if (source) return { file: tui, args: ['--resume', source], ...(session.forkPending ? {} : { nativeSessionId: source }) };
+    return { file: tui, args: [session.cwd] };
+  }
+  const file = await findExecutable(session.backend);
+  if (!file) throw new Error(`未找到 ${LABELS[session.backend]}，请安装原生命令并加入 PATH`);
   if (session.backend === 'claude') {
     if (source && !session.forkPending) return { file, args: ['--resume', source], nativeSessionId: source };
     const nativeSessionId = randomUUID();
@@ -228,7 +253,73 @@ async function claudeSessions(home: string): Promise<Candidate[]> {
   });
 }
 
+/** dsh 0.2 / dsh-tui keep no projcache. Each session directory's log starts
+ * with a header frame `{type:'session', id, createdAt, cwd}`; the directory
+ * slug is lossy, so the header is the only trustworthy cwd. */
+async function dshSessionDirectories(home: string): Promise<Candidate[]> {
+  const rows: Candidate[] = [];
+  const scan = budget();
+  let slugs: Dirent[];
+  try { slugs = await opendirEntries(join(home, 'sessions')); } catch { return rows; }
+  for (const slug of slugs) {
+    if (!slug.isDirectory() || !withinBudget(scan)) break;
+    let ids: Dirent[];
+    try { ids = await opendirEntries(join(home, 'sessions', slug.name)); } catch { continue; }
+    for (const entry of ids) {
+      if (!withinBudget(scan)) break;
+      scan.entries--;
+      if (!entry.isDirectory() || !DSH_ID.test(entry.name)) continue;
+      const directory = join(home, 'sessions', slug.name, entry.name);
+      let names: Dirent[];
+      try { names = await opendirEntries(directory); } catch { continue; }
+      const log = names.filter(n => n.isFile() && /^session(?:\.v\d+)?\.jsonl(?:\.zstd)?$/.test(n.name)).map(n => n.name).sort().at(-1);
+      if (!log) continue;
+      const path = join(directory, log);
+      try {
+        const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        let header: { id?: unknown; createdAt?: unknown; cwd?: unknown } | null = null;
+        let modified = 0;
+        try {
+          const info = await file.stat();
+          if (!info.isFile()) continue;
+          modified = info.mtimeMs;
+          // Only the first frame/line is needed; cap the read regardless of size.
+          const buffer = Buffer.alloc(Math.min(info.size, 65536));
+          const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+          const bytes = buffer.subarray(0, bytesRead);
+          let text: string;
+          if (log.endsWith('.zstd')) text = zstdDecompressSync(bytes, { maxOutputLength: 1 << 20 }).toString('utf8');
+          else text = bytes.toString('utf8');
+          header = JSON.parse(text.split('\n', 1)[0]);
+        } finally { await file.close(); }
+        if (!header || header.id !== entry.name || !validCwd(header.cwd)) continue;
+        rows.push({ backend: 'dsh', nativeSessionId: entry.name, title: 'DeepSeek Harness 会话', cwd: header.cwd, createdAt: iso(header.createdAt, modified), lastActivity: iso(modified) });
+      } catch { /* torn header during a concurrent write; next discovery sees it */ }
+    }
+  }
+  return rows;
+}
+async function opendirEntries(path: string): Promise<Dirent[]> {
+  const result: Dirent[] = [];
+  const directory = await opendir(path);
+  for await (const entry of directory) { result.push(entry); if (result.length >= 2000) break; }
+  return result;
+}
+
 async function dshSessions(home: string): Promise<Candidate[]> {
+  const [cached, walked] = await Promise.all([dshProjcacheSessions(home), dshSessionDirectories(home)]);
+  // The projcache carries titles; directories carry sessions the cache lacks.
+  const byId = new Map(walked.map(row => [row.nativeSessionId, row]));
+  for (const row of cached) {
+    const base = byId.get(row.nativeSessionId);
+    // Keep whichever side has a value; a cache row without createdAt must not
+    // erase the one read from the log header (and vice versa).
+    byId.set(row.nativeSessionId, base ? { ...base, ...Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined)) } : row);
+  }
+  return [...byId.values()].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)).slice(0, DISCOVERY_LIMIT);
+}
+
+async function dshProjcacheSessions(home: string): Promise<Candidate[]> {
   try {
     const file = await open(join(home, 'storages', 'session_projcache.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let content: string;
@@ -247,7 +338,7 @@ async function dshSessions(home: string): Promise<Candidate[]> {
     for (const [nativeSessionId, raw] of Object.entries(doc.tables?.sessions ?? {})) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
       const item = raw as { identity?: { cwd?: string; createdAt?: number }; rows?: Record<string, { val?: unknown }> };
-      if (!nativeSessionId.startsWith('session-') || !UUID.test(nativeSessionId.slice(8)) || !validCwd(item.identity?.cwd)) continue;
+      if (!DSH_ID.test(nativeSessionId) || !validCwd(item.identity?.cwd)) continue;
       const meta = item.rows?.sessionListMetadata?.val as { lastPromptAt?: number } | undefined;
       rows.push({ backend: 'dsh', nativeSessionId, title: label(item.rows?.title?.val, 'DeepSeek Harness 会话'), cwd: item.identity.cwd, createdAt: iso(item.identity.createdAt), lastActivity: iso(meta?.lastPromptAt ?? item.identity.createdAt) });
     }
