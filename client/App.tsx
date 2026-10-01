@@ -501,7 +501,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   // session's directory; on list views it keeps the last chosen workspace.
   const explorerSession = selected ?? workspaceSession;
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${selected ? 'session-open' : ''}`}>
     {/* A left rail carries navigation and groups; the toolbar above the
         content carries what acts on the current view. On phones the rail
         becomes a bottom tab bar and the toolbar stays on top. */}
@@ -638,10 +638,11 @@ function SessionCard({ session, canFork, onOpen, onRename, onFork, onPin, onArch
   }, [menu]);
   const preview = session.statusDetail || (session.forkPending ? '启动时将通过原生能力分叉上下文' : session.nativeSessionId ? '上下文已连接，点击继续' : '准备就绪，点击进入会话');
   return <article onClick={(event) => { if (!(event.target as Element).closest('button, a, .dropdown-menu')) onOpen(event.currentTarget.querySelector<HTMLButtonElement>('.card-main') ?? undefined); }} className={`session-card tone-${STATUS[session.status].className} ${attention(session) ? 'has-attention' : ''} ${pending(session) && !session.archived ? 'has-unread' : ''} ${session.archived ? 'archived-card' : ''}`}>
+    <button className={`icon-button card-pin ${session.pinned ? 'pinned' : ''}`} aria-label={session.pinned ? `取消置顶 ${session.title}` : `置顶 ${session.title}`} aria-pressed={session.pinned} title={session.pinned ? '取消置顶' : '置顶到最前'} onClick={onPin}>{session.pinned ? <Pin size={12} className="pinned-icon" /> : <PinOff size={12} />}</button>
     <div className="card-head">
       <span className="avatar-wrap"><BackendAvatar backend={session.backend} />{pending(session) && <span className="unread-badge" aria-label={`${session.unread} 条未读提醒`}>{session.unread > 99 ? '99+' : session.unread}</span>}</span>
       <div className="card-title">
-        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={(event) => onOpen(event.currentTarget)}><h3 title={session.title}>{session.title}</h3></button><button className={`icon-button card-pin ${session.pinned ? 'pinned' : ''}`} aria-label={session.pinned ? `取消置顶 ${session.title}` : `置顶 ${session.title}`} aria-pressed={session.pinned} title={session.pinned ? '取消置顶' : '置顶到最前'} onClick={onPin}>{session.pinned ? <Pin size={12} className="pinned-icon" /> : <PinOff size={12} />}</button></div>
+        <div className="card-title-row"><button className="card-main" aria-label={`进入 ${session.title} 的会话`} onClick={(event) => onOpen(event.currentTarget)}><h3 title={session.title}>{session.title}</h3></button></div>
         {session.lastUserInput && <div className="card-prompt"><p title={session.lastUserInput}>{session.lastUserInput}</p></div>}
       </div>
       {session.status !== 'idle' && session.status !== 'stopped' && <span className="card-state"><StatusBadge session={session} /></span>}

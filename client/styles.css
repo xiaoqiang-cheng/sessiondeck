@@ -167,8 +167,8 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .section-count { font-size: 12px; color: var(--faint); }
 
 /* ——— Cards: dense device-console tiles with IM unread cues ——— */
-.contact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
-.session-card { --ring: var(--red); --tone: var(--line-strong); position: relative; display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 10px 12px; background: var(--bg); border-radius: 11px; border-top: 2px solid var(--tone); box-shadow: var(--shadow); cursor: pointer; transition: box-shadow .15s; }
+.contact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+.session-card { --ring: var(--red); --tone: var(--line-strong); position: relative; display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 10px 12px; background: var(--bg); border-radius: 6px; border-top: 2px solid var(--tone); box-shadow: var(--shadow); cursor: pointer; transition: box-shadow .15s; }
 .session-card:hover { box-shadow: var(--shadow-lift); }
 .session-card.tone-running { --tone: var(--green); }
 .session-card.tone-waiting { --tone: var(--accent); }
@@ -183,7 +183,9 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .card-main { min-width: 0; text-align: left; border-radius: 4px; }
 .card-main h3 { font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pinned-icon { color: var(--accent); flex-shrink: 0; }
-.card-pin { width: 22px; height: 22px; flex-shrink: 0; color: var(--faint); opacity: 0; }
+/* Fixed in the top-right corner; the status badge below it leaves this gutter free. */
+.card-pin { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; color: var(--faint); opacity: 0; }
+.card-state { margin-right: 22px; }
 .card-pin.pinned, .session-card:hover .card-pin, .card-pin:focus-visible { opacity: 1; }
 .card-pin:hover { color: var(--accent); }
 @media (pointer: coarse) { .card-pin { opacity: 1; } }
@@ -671,7 +673,7 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
   .session-tabs { height: 40px; }
   .session-tab>button[role="tab"] { font-size: 13px; padding-left: 14px; }
   .session-tab-close { width: 28px; height: 28px; opacity: 1; }
-  .session-card { padding: 12px 14px; border-radius: 12px; }
+  .session-card { padding: 12px 14px; border-radius: 8px; }
   .card-pin { opacity: 1; }
   .terminal-toolbar { height: 38px; }
   .terminal-toolbar button { width: 34px; height: 34px; }
@@ -795,6 +797,28 @@ select { height: 34px; padding: 0 28px 0 10px; border: 1px solid var(--line-stro
 .terminal-send { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 38px; height: 38px; border-radius: 10px; background: var(--accent); color: #fff; }
 .terminal-send:hover:not(:disabled) { background: var(--accent-dark); }
 @media (max-width: 720px) { .terminal-composer { padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); } }
+
+/* Phone, session open: the terminal is the page. The toolbar and bottom bar
+   go away (the tab strip's × returns to the list), the header is one row and
+   the terminal fills edge to edge. Chrome drops from ~360px to ~170px on an
+   844px screen. */
+@media (max-width: 720px) {
+  .session-open .topbar, .session-open .rail { display: none; }
+  .session-open .session-tabs { height: 44px; padding-top: env(safe-area-inset-top); box-sizing: content-box; }
+  .session-open .drawer-header { flex-wrap: nowrap; gap: 6px; min-height: 40px; padding: 2px 6px 2px 10px; }
+  .session-open .drawer-heading-text { flex: 1 1 auto; flex-basis: auto; min-width: 0; }
+  .session-open .drawer-title { max-width: none; }
+  .session-open .drawer-title h2 { font-size: 13.5px; }
+  .session-open .drawer-title .status-badge { display: none; }
+  .session-open .private-view-switch button { padding: 0 7px; font-size: 11.5px; }
+  .session-open .private-view-switch button svg { display: none; }
+  .session-open .drawer-actions .button.small-button { height: 28px; padding: 0 8px; font-size: 12px; }
+  .session-open .terminal-pane, .session-open .native-web, .session-open .terminal-empty { margin: 0; border-radius: 0; }
+  .session-open .terminal-toolbar { height: 32px; }
+  .session-open .terminal-toolbar button { width: 30px; height: 30px; }
+  .session-open .terminal-quick-keys button { height: 26px; }
+  .session-open .terminal-composer { gap: 4px; padding: 4px 8px calc(6px + env(safe-area-inset-bottom)); }
+}
 @media (pointer: coarse) { .terminal-container { touch-action: none; overscroll-behavior: contain; } }
 
 /* Installed to the home screen: no browser chrome, so the page itself is the app. */

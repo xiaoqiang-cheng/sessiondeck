@@ -284,3 +284,10 @@
 - 验证：隔离端到端——后端能力 `terminal:true`；创建并启动后 PTY 中出现 dsh-TUI 界面；未发送任何输入即由日志头解析出原生 id；输入后状态由 `turn/end` 置为 native 来源（隔离环境无 API key 故为 error，符合预期）；对话记录读出用户消息；停止返回 stopped。新增单元测试：两种 id、TUI 启动参数、按头发现与身份解析、dsh 生命周期事件与压缩日志观察。`npm run verify`：181 项后端、67 项浏览器通过。
 - 排查中修复：模板字符串里插入带 `^…$` 锚点的 RegExp 导致 dsh id 全部校验失败（12 项测试）。
 - 待用户决定：正式使用需 `npm install -g @deepseek-ai/dsh@latest`，会升级日常使用的 dsh。
+
+## 2026-10-01：卡片细节与手机端会话可读区域
+
+- dsh 升级：全局 `@deepseek-ai/dsh` 0.1.1-rc.2 → 0.2.0-rc.2，`dsh-tui doctor` 全部通过，隔离工作区里 dsh-tui 启动正常、SIGTERM 干净退出。随后用 `scripts/restart-service.sh` 重启正式服务：现由 systemd 管理（MainPID 与监听进程一致），后端能力 dsh `terminal:true`，2 个会话已恢复。
+- 卡片：图钉固定在右上角（绝对定位），不再占标题行；状态徽章让出右侧 22px 避免重叠。网格间距 12→8px，圆角 11→6px（手机 12→8px）。
+- 手机端会话：实测 844px 高的屏幕上会话内容只占 485px（57%），顶部工具栏、标签栏、两行高的会话头、底部标签栏共吃掉 359px。现在会话打开时隐藏顶部工具栏和底部标签栏（标签页的 × 返回列表），会话头压成一行（隐藏状态徽章、切换按钮去图标），终端去掉外边距贴边显示。内容区 485→646px（77%）。关闭标签后工具栏和底栏恢复。
+- `npm run verify`：181 项后端、67 项浏览器通过。截图 `artifacts/cards-pin-corner.png`、`mobile-session-before.png`、`mobile-session-after.png`。
