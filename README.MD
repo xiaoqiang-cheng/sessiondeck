@@ -440,6 +440,16 @@ dsh 原生界面已在 Chromium 内嵌验证，无页面脚本错误，历史请
 
 ## 14. 日常使用与恢复
 
+### Codex 沙箱在 Ubuntu 24.04 上无法启动
+
+症状：Codex 的每条命令都在执行前失败，报 `bwrap: setting up uid map: Permission denied`。原因是 Ubuntu 23.10+ 默认 `kernel.apparmor_restrict_unprivileged_userns=1`，没有 AppArmor 配置文件的程序不能创建用户命名空间，而 Codex 的 Linux 沙箱正是 `/usr/bin/bwrap`。这与 SessionDeck 无关，在普通终端里直接运行 Codex 也一样。在终端执行一次（需要 sudo）：
+
+```bash
+scripts/fix-codex-sandbox.sh
+```
+
+它给 bwrap 写入一个只授予 `userns` 的 AppArmor 配置文件并加载，沙箱本身保持开启；已打开的 Codex 会话直接恢复，不用重启任何服务。
+
 ### 远程重启服务
 
 服务可以作为 `systemd --user` 单元运行，这样在任何地方（包括远程打开的 SessionDeck 底部 Shell）都能重启它，重启电脑后也会自动拉起：
