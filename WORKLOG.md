@@ -291,3 +291,8 @@
 - 卡片：图钉固定在右上角（绝对定位），不再占标题行；状态徽章让出右侧 22px 避免重叠。网格间距 12→8px，圆角 11→6px（手机 12→8px）。
 - 手机端会话：实测 844px 高的屏幕上会话内容只占 485px（57%），顶部工具栏、标签栏、两行高的会话头、底部标签栏共吃掉 359px。现在会话打开时隐藏顶部工具栏和底部标签栏（标签页的 × 返回列表），会话头压成一行（隐藏状态徽章、切换按钮去图标），终端去掉外边距贴边显示。内容区 485→646px（77%）。关闭标签后工具栏和底栏恢复。
 - `npm run verify`：181 项后端、67 项浏览器通过。截图 `artifacts/cards-pin-corner.png`、`mobile-session-before.png`、`mobile-session-after.png`。
+
+## 2026-10-02：侧栏改为手动展开；Codex 沙箱故障定位
+
+- 侧栏不再随鼠标悬停伸缩，默认收起，底部新增「展开/收起侧栏」按钮，状态记在 localStorage。底部「…」菜单之前被 `.rail { overflow: hidden }` 裁掉一半，现在侧栏不再裁剪子元素（只给品牌、导航、群组列表各自加 overflow），菜单提升 z-index，向右上弹出。探针确认：悬停宽度不变、切换后 208px 且刷新保留、菜单 3 项全部可见且未被遮挡。`npm run verify`：181 项后端、67 项浏览器通过。
+- Codex 沙箱：读取 `personal`（2026-10-02）与 `zem-webui CI 异常`（2026-10-01）两个会话记录，所有命令（含 `id`）在执行前失败于 `bwrap: setting up uid map: Permission denied`。在本机交互 shell 直接运行 `unshare -U -r id` 和 `bwrap --unshare-user` 得到同样错误，与 SessionDeck 无关：systemd 单元无 RestrictNamespaces/NoNewPrivileges 等限制，服务环境与登录 shell 一致。根因是 Ubuntu 24.04 的 `kernel.apparmor_restrict_unprivileged_userns = 1`：无 AppArmor 配置文件的二进制（`/usr/bin/bwrap` 没有）被禁止创建用户命名空间，而 Codex 的 Linux 沙箱正是 bwrap。rollout 的 `turn_context` 确认策略为 `approval_policy=never, sandbox=workspace-write`。修复需要 root（为 bwrap 添加允许 `userns` 的 AppArmor 配置），已把命令交给用户；临时绕过可在 Codex 配置里改 `sandbox_mode = "danger-full-access"`，但会失去沙箱。

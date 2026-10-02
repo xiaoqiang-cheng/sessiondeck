@@ -4,7 +4,7 @@ import {
   CircleHelp, Clock3, Command, Copy, Ellipsis, ExternalLink, Folder,
   GitFork, LoaderCircle, MessageSquare, Pencil, Pin, PinOff, Play, Plus,
   Radio, Search, Send, Settings2, Share2, SlidersHorizontal, Square, UsersRound, X,
-  PanelBottomOpen, Volume2, VolumeX, TerminalSquare, Link2,
+  PanelBottomOpen, Volume2, VolumeX, TerminalSquare, Link2, PanelLeftOpen, PanelLeftClose,
 } from 'lucide-react';
 import type { AppState, StatePatch, Backend, DiscoveredSession, Delivery, Group, GroupDetail, GroupMessage, Session, SessionStatus } from '../shared/types';
 import { applyStatePatch } from './state';
@@ -101,6 +101,9 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
   const [modal, setModal] = useState<Modal>(null);
   const [selection, setSelection] = useState('');
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readLocalPreference('sessiondeck.explorer-open') === 'on');
+  // The rail is collapsed by default and only expands on request, never on hover.
+  const [railOpen, setRailOpen] = useState(() => readLocalPreference('sessiondeck.rail') === 'open');
+  const toggleRail = () => { setRailOpen(value => { writeLocalPreference('sessiondeck.rail', value ? 'closed' : 'open'); return !value; }); };
   const [openTabs, setOpenTabs] = useState<string[]>(readOpenTabs);
   // Only an explicit open (card, activity, group link) starts the agent. Route
   // restores, reloads, history and tab switches keep today's no-launch rule.
@@ -505,7 +508,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
     {/* A left rail carries navigation and groups; the toolbar above the
         content carries what acts on the current view. On phones the rail
         becomes a bottom tab bar and the toolbar stays on top. */}
-    <nav className="rail" aria-label="工作空间导航" inert={!!modal}>
+    <nav className={`rail ${railOpen ? 'expanded' : ''}`} aria-label="工作空间导航" inert={!!modal}>
       <a className="brand" href="#" aria-label="SessionDeck" title="SessionDeck" onClick={(event) => { event.preventDefault(); navigate('contacts'); }}><span className="brand-mark"><BrandMark /></span></a>
       <div className="rail-primary primary-nav">
         {tab('contacts', <MessageSquare size={18} />, '联系人', personal.length)}
@@ -519,6 +522,7 @@ export default function App({ auth = { kind: 'owner', remote: false, passwordSet
         <button className="rail-add-group" disabled={!state} aria-label="创建群组" title="创建群组" onClick={() => setModal({ type: 'group' })}><Plus size={15} /><span className="group-name">新建群组</span></button>
       </div>
       <div className="rail-footer">
+        <button className="icon-button rail-toggle" aria-label={railOpen ? '收起侧栏' : '展开侧栏'} title={railOpen ? '收起侧栏' : '展开侧栏'} aria-expanded={railOpen} onClick={toggleRail}>{railOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button>
         <span className="connection-indicator" title={connectionLabel}><span className={`connection-dot ${connected ? 'online' : ''}`} /><span className="sr-only">{connectionLabel}</span></span>
         <MoreMenu items={[
           { label: '导入会话', icon: <ArrowDownToLine size={14} />, disabled: !state, onSelect: () => setModal({ type: 'import' }) },
